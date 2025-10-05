@@ -1,10 +1,10 @@
 streamlit==1.37.0
 
-# Versions compatibles avec ydata-profiling 4.6.0
-pandas==2.0.3          # < 2.1 requis par ydata-profiling 4.6.0
-numpy==1.26.4
-matplotlib==3.7.3      # ≤ 3.7.3 requis par ydata-profiling 4.6.0
-seaborn==0.12.2        # < 0.13 requis par ydata-profiling 4.6.0
+# Compatibles avec ydata-profiling 4.6.0
+pandas==2.0.3          # (< 2.1 requis par ydata-profiling 4.6.0)
+numpy==1.25.2          # (< 1.26 requis par ydata-profiling 4.6.0 ; évite 1.24.0)
+matplotlib==3.7.3      # (≤ 3.7.3 requis par ydata-profiling 4.6.0)
+seaborn==0.12.2        # (< 0.13 requis par ydata-profiling 4.6.0)
 
 scikit-learn==1.4.2
 scipy==1.11.4
@@ -14,8 +14,6 @@ ydata-profiling==4.6.0
 phik==0.12.4
 
 # Épingles pour éviter les conflits vus dans les logs avec Streamlit 1.37
-rich==13.9.4           # Streamlit 1.37 demande rich < 14
-markdown-it-py==3.0.0  # Compatible avec rich<14
+rich==13.9.4
+markdown-it-py==3.0.0
 mdurl==0.1.2
-
-
