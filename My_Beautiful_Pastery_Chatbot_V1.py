@@ -1,244 +1,308 @@
-#############################################################
-# 📚 Imports
-#############################################################
-import unicodedata
-import re
-import string
-import streamlit as st
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
+# bank_face_verify_poc.py
+# ----------------------------------------------------------
+# Face Verification (PoC) — Streamlit + OpenCV (secure snapshot flow)
+# ----------------------------------------------------------
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Optional, Tuple
 
-#############################################################
-# 🔒 NLTK: télécharger si besoin
-#############################################################
-def safe_nltk_download(resource, name):
-    try:
-        nltk.data.find(resource)
-    except LookupError:
-        nltk.download(name)
+import cv2
+import numpy as np
+import streamlit as st
 
-safe_nltk_download('tokenizers/punkt', 'punkt')
-safe_nltk_download('corpora/stopwords', 'stopwords')
-safe_nltk_download('corpora/wordnet', 'wordnet')
-
-# --- Helpers de normalisation (mets-les au-dessus du parseur)
-def normalize_question(q: str) -> str:
-    """Normalise une question pour l'appariement exact."""
-    q = q.strip().lower()
-    # retirer préfixe q:/question:
-    q = re.sub(r'^(q|question)\s*[:=\-]\s*', '', q, flags=re.I)
-    # normaliser unicode et enlever accents
-    q = unicodedata.normalize('NFKC', q)
-    q = ''.join(c for c in q if not unicodedata.category(c).startswith('M'))
-    # remplacer ponctuation par espaces
-    q = re.sub(r'[^\w\s]', ' ', q)
-    # compacter espaces
-    q = re.sub(r'\s+', ' ', q).strip()
-    return q
-
-#############################################################
-# ⚙️ Prétraitement
-#############################################################
-STOPWORDS = set(stopwords.words('english'))
-LEMMATIZER = WordNetLemmatizer()
-
-def preprocess_text(sentence: str):
-    """Tokenisation + minuscules + stopwords/ponctuation + lemmatisation."""
-    words = word_tokenize(sentence)
-    words = [w.lower() for w in words if w.lower() not in STOPWORDS and w not in string.punctuation]
-    words = [LEMMATIZER.lemmatize(w) for w in words]
-    return words
-
-#############################################################
-# 📂 Lecture du fichier Q&A (robuste : Q/A sur une ou deux lignes)
-#############################################################
-
-@st.cache_resource
-def load_qa_file(file_path: Path):
+# ===================== PAGE & STYLE =====================
+st.set_page_config(page_title="BankID • Face Verification (PoC)", page_icon="🏦", layout="wide")
+st.markdown(
     """
-    Retourne:
-      - intro_lines : texte avant la section Q&A (list[str])
-      - questions   : liste des questions (list[str])
-      - answers     : liste des réponses (list[str])
-      - outro_lines : texte après la section Q&A (list[str])
-      - q_tokens    : questions tokenisées (pour la similarité)
-    Accepte :
-      • Q: ... A: ... sur la même ligne
-      • Q: ... \n A: ... sur deux lignes
-      • Puces éventuelles ('-', '•') devant Q:/A:
-      • Espaces/tirets unicode (NBSP, –, —)
-      • Retours Windows \r\n
+    <style>
+      .stApp { background: #ffffff; }
+      .app-header { text-align:center; margin-top:.4rem; }
+      .brand { font-size: 1.85rem; font-weight: 800; letter-spacing:.3px; color:#0f172a;}
+      .subtitle { color:#475569; margin-top:.15rem; }
+      .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px 14px; background:#fff; }
+      .section-title { font-weight:700; color:#0f172a; margin-bottom:.5rem; }
+      .badge { display:inline-block; padding:.25rem .6rem; border-radius:999px; font-weight:700; border:1px solid #e5e7eb;}
+      .ok { background:#ecfdf5; color:#065f46; border-color:#a7f3d0;}
+      .ko { background:#fef2f2; color:#991b1b; border-color:#fecaca;}
+      .metric { font-size:1.6rem; font-weight:800; }
+      .muted { color:#64748b; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ===================== ENTÊTE =====================
+st.markdown(
     """
+    <div class="app-header">
+      <div class="brand">BankID • Face Verification (PoC)</div>
+      <div class="subtitle">Secure snapshot-based verification — no continuous streaming</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-    def _norm_whitespace(s: str) -> str:
-        # normalise unicode + remplace NBSP/tirets longs + compacte espaces
-        s = unicodedata.normalize("NFKC", s)
-        s = s.replace("\u00A0", " ")   # NBSP -> espace
-        s = s.replace("\u2013", "-")   # – -> -
-        s = s.replace("\u2014", "-")   # — -> -
-        s = s.replace("\r\n", "\n")    # CRLF -> LF
-        s = s.replace("\r", "\n")
-        s = re.sub(r"[ \t]+", " ", s)
-        return s
+# ===================== HAAR CASCADE =====================
+CASCADE_FILE = "haarcascade_frontalface_default.xml"
+local_path = Path(__file__).parent / CASCADE_FILE
+opencv_path = Path(cv2.data.haarcascades) / CASCADE_FILE
 
-    raw = Path(file_path).read_text(encoding="utf-8", errors="replace")
-    # retirer un éventuel BOM
-    if raw and raw[0] == "\ufeff":
-        raw = raw[1:]
-    raw = _norm_whitespace(raw)
-
-    # --------- 1) REGEX pleine page : Q … A … (jusqu’à prochaine Q ou fin) ----------
-    pair_re = re.compile(
-        r'(?:^|\n)\s*(?:[-•]\s*)?(?:Q|Question)\s*[:=\-]?\s*(.*?)\s*'
-        r'(?:\n|\s)+(?:[-•]\s*)?(?:A|Answer)\s*[:=\-]?\s*(.*?)(?=\n\s*(?:[-•]\s*)?(?:Q|Question)\s*[:=\-]?|\Z)',
-        flags=re.IGNORECASE | re.DOTALL
+if local_path.exists():
+    CASCADE_PATH = local_path
+elif opencv_path.exists():
+    CASCADE_PATH = opencv_path
+else:
+    st.error(
+        "❌ Haar cascade not found.\n"
+        f"Place {CASCADE_FILE} next to this .py or rely on OpenCV’s default path:\n{opencv_path}"
     )
+    st.stop()
 
-    matches = list(pair_re.finditer(raw))
-    questions, answers = [], []
+face_cascade = cv2.CascadeClassifier(str(CASCADE_PATH))
+if face_cascade.empty():
+    st.error("❌ Haar cascade failed to load (file may be corrupted).")
+    st.stop()
 
-    if matches:
-        for m in matches:
-            q = m.group(1).strip()
-            a = m.group(2).strip()
-            if q and a:
-                questions.append(q)
-                answers.append(a)
+# ===================== HELPERS =====================
+def hex_to_bgr(hex_color: str) -> Tuple[int, int, int]:
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    return (b, g, r)
 
-        # calcul d’intro/outro via la zone couverte par la 1ère et dernière paire
-        intro_text = raw[:matches[0].start()]
-        outro_text = raw[matches[-1].end():]
+def largest_face_bbox(gray: np.ndarray, scale_factor: float, min_neighbors: int):
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
+    if len(faces) == 0:
+        return None
+    return max(faces, key=lambda b: b[2] * b[3])
 
-        intro_lines = [ln for ln in intro_text.split("\n") if ln.strip()]
-        outro_lines = [ln for ln in outro_text.split("\n") if ln.strip()]
+def face_vector_from_bgr(
+    bgr: np.ndarray,
+    scale_factor: float,
+    min_neighbors: int,
+    size: int = 128,
+) -> Optional[np.ndarray]:
+    """Return normalized grayscale vector from the largest detected face (None if no face)."""
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    bbox = largest_face_bbox(gray, scale_factor, min_neighbors)
+    if bbox is None:
+        return None
+    x, y, w, h = bbox
+    crop = gray[y : y + h, x : x + w]
+    crop = cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA)
+    vec = crop.astype(np.float32).ravel()
+    norm = np.linalg.norm(vec)
+    if norm < 1e-8:
+        return None
+    return vec / norm
 
+def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity (a and b must be L2-normalized)."""
+    return float(np.dot(a, b))
+
+def bgr_from_file(file) -> Optional[np.ndarray]:
+    """Read uploaded/camera-input image to BGR np.ndarray."""
+    if file is None:
+        return None
+    data = file.getvalue() if hasattr(file, "getvalue") else file.read()
+    if data is None:
+        return None
+    buf = np.frombuffer(data, np.uint8)
+    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    return img
+
+def draw_faces(bgr: np.ndarray, color_bgr: Tuple[int, int, int], scale_factor: float, min_neighbors: int) -> np.ndarray:
+    out = bgr.copy()
+    gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
+    for (x, y, w, h) in faces:
+        cv2.rectangle(out, (x, y), (x + w, y + h), color_bgr, 2)
+    return out
+
+# ===================== STATE =====================
+defaults = {
+    "ref_vec": None,
+    "ref_img": None,
+    "last_result": None,   # dict: similarity, percent, threshold, passed
+    "scale_factor": 1.30,
+    "min_neighbors": 5,
+    "rect_hex": "#2563eb",
+    "threshold": 0.86,
+    "allow_persist": False,   # PoC: off by default (no disk write)
+}
+for k, v in defaults.items():
+    st.session_state.setdefault(k, v)
+
+# ===================== INSTRUCTIONS =====================
+st.markdown(
+    """
+<div class="card">
+  <div class="section-title">How it works (snapshot & consent)</div>
+  <ul class="muted">
+    <li>📌 <b>Reference</b>: upload a photo <i>or</i> take a snapshot with your camera.</li>
+    <li>📌 <b>Proof</b>: take a snapshot with your camera for verification.</li>
+    <li>🔒 PoC stores images in memory only (no disk), unless you explicitly enable saving.</li>
+  </ul>
+</div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ===================== SIDEBAR (PARAMS & SECURITY NOTES) =====================
+with st.sidebar:
+    st.header("Verification parameters")
+    st.session_state.rect_hex = st.color_picker("Rectangle color", st.session_state.rect_hex)
+    st.caption("Purely visual — color of the detection boxes.")
+
+    st.session_state.scale_factor = st.slider("scaleFactor", 1.05, 1.60, st.session_state.scale_factor, 0.01)
+    st.caption(">1.0. Larger = faster/rougher scanning; typical 1.1–1.4.")
+
+    st.session_state.min_neighbors = st.slider("minNeighbors", 1, 12, st.session_state.min_neighbors, 1)
+    st.caption("Higher = fewer false positives, needs more stable face.")
+
+    st.session_state.threshold = st.slider("Decision threshold (cosine)", 0.50, 0.98, st.session_state.threshold, 0.01)
+    st.caption("Similarity ≥ threshold ⇒ PASS. Higher threshold = stricter decision.")
+
+    st.divider()
+    st.header("Security (PoC)")
+    st.session_state.allow_persist = st.checkbox("Allow saving images to disk (snapshots/)", value=False)
+    st.caption("If disabled (default), images stay in memory and are discarded on refresh.")
+
+# ===================== LAYOUT =====================
+left, right = st.columns([6, 6])
+
+# ---- RIGHT: RESULT (persistent) ----
+with right:
+    st.markdown('<div class="section-title">Verification result</div>', unsafe_allow_html=True)
+    res = st.session_state.last_result
+    if res is None:
+        st.caption("Capture a reference and a proof, then click **Verify**.")
     else:
-        # --------- 2) FALLBACK ligne à ligne (Q seule puis A seule) ----------
-        intro_lines, outro_lines = [], []
-        found_qa_section = False
-        current_q = None
+        sim = res["similarity"]
+        percent = res["percent"]
+        threshold = res["threshold"]
+        passed = res["passed"]
 
-        PAT_Q = re.compile(r'^\s*(?:[-•]\s*)?(?:Q|Question)\s*[:=\-]?\s*(.*)$', re.I)
-        PAT_A = re.compile(r'^\s*(?:[-•]\s*)?(?:A|Answer)\s*[:=\-]?\s*(.*)$', re.I)
-        PAT_QA_SAME = re.compile(
-            r'^\s*(?:[-•]\s*)?(?:Q|Question)\s*[:=\-]?\s*(.*?)\s+(?:[-•]\s*)?(?:A|Answer)\s*[:=\-]?\s*(.*?)\s*$',
-            re.I
-        )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**Similarity**")
+            st.markdown(f"<div class='metric'>{sim:.3f}</div>", unsafe_allow_html=True)
+        with c2:
+            st.markdown("**Match (%)**")
+            st.markdown(f"<div class='metric'>{percent:.1f}%</div>", unsafe_allow_html=True)
+        with c3:
+            st.markdown("**Threshold**")
+            st.markdown(f"<div class='metric'>{threshold:.2f}</div>", unsafe_allow_html=True)
 
-        for raw_line in raw.split("\n"):
-            line = raw_line.strip()
-            if not line:
-                continue
-
-            both = PAT_QA_SAME.match(line)
-            if both:
-                found_qa_section = True
-                questions.append(both.group(1).strip())
-                answers.append(both.group(2).strip())
-                current_q = None
-                continue
-
-            mq = PAT_Q.match(line)
-            if mq:
-                found_qa_section = True
-                current_q = mq.group(1).strip()
-                continue
-
-            ma = PAT_A.match(line)
-            if ma and current_q:
-                questions.append(current_q)
-                answers.append(ma.group(1).strip())
-                current_q = None
-                continue
-
-            if not found_qa_section:
-                intro_lines.append(line)
-            else:
-                outro_lines.append(line)
-
-    # ---------- Sécurité / message utile ----------
-    if not questions or len(questions) != len(answers):
-        # petit extrait pour diagnostiquer rapidement au besoin
-        excerpt = "\n".join([ln for ln in raw.split("\n")[:20]])
-        raise ValueError(
-            "❌ Format invalide : il faut des paires Q:/A: (sur une ou deux lignes).\n"
-            "Extrait du début du fichier pour diagnostic :\n"
-            f"{excerpt}"
-        )
-
-    # tokenisation des questions pour la similarité
-    q_tokens = [preprocess_text(q) for q in questions]
-    return intro_lines, questions, answers, outro_lines, q_tokens
-
-#############################################################
-# 🔎 Recherche de la meilleure réponse (similarité de Jaccard)
-#############################################################
-def find_best_answer(user_question: str, questions, answers, q_tokens):
-    # 1) Essayez d'abord un match exact sur une version normalisée
-    norm_user = normalize_question(user_question)
-    norm_map = {normalize_question(q): i for i, q in enumerate(questions)}
-    if norm_user in norm_map:
-        return answers[norm_map[norm_user]]
-
-    # 2) Sinon, fallback sur la similarité (ton code existant)
-    tokens = preprocess_text(user_question)
-    if not tokens:
-        return "⚠️Thanks for asking a valid question."
-
-    qset = set(tokens)
-    best_idx, best_sim = -1, 0.0
-    for i, qt in enumerate(q_tokens):
-        sset = set(qt)
-        union = qset | sset
-        if not union:
-            continue
-        sim = len(qset & sset) / float(len(union))
-        if sim > best_sim:
-            best_sim, best_idx = sim, i
-
-    if best_idx == -1:
-        return ("😕 Oups..., I do not have an answer. "
-                "Please ask another one or contact us during opening hours.")
-    return answers[best_idx]
-
-
-#############################################################
-# 🎨 Interface Streamlit
-#############################################################
-def main():
-    st.title("💗🥐 My Beautiful Pastery — Chatbot")
-    st.write("Posez vos questions : horaires, boutique en ligne, produits healthy, gâteaux sur mesure, etc.")
-
-    target_file = Path(__file__).parent / "My_pastery_chatbot_QandA.txt"
-    intro, questions, answers, outro, q_tokens = load_qa_file(target_file)
-
-    with st.expander("🔎 Debug (questions normalisées)"):
-        st.write([normalize_question(q) for q in questions])
-        st.write("User normalized:", normalize_question(st.session_state.get("last_q", "")))
-
-    if intro:
-        st.markdown("### 🌸 About us")
-        st.write("\n".join(intro))
-
-    user_q = st.text_input("💬 Your question :", placeholder="Ex. : Is it easy to access to your boutique ?")
-    if st.button("Envoyer"):
-        st.session_state["last_q"] = user_q
-        if not user_q.strip():
-            st.warning("Thanks for asking me a question 😉")
+        st.markdown("**Decision**")
+        if passed:
+            st.markdown("<span class='badge ok'>✅ PASS</span>", unsafe_allow_html=True)
         else:
-            answer = find_best_answer(user_q, questions, answers, q_tokens)
-            st.markdown(f"**🤖 Chatbot :** {answer}")
+            st.markdown("<span class='badge ko'>❌ FAIL</span>", unsafe_allow_html=True)
 
-    if outro:
-        st.markdown("---")
-        st.markdown("### 🌸 Other informations")
-        st.write("\n".join(outro))
+        st.caption("Cosine similarity on 128×128 grayscale face crops. % is clipped to [0–100].")
 
-#############################################################
-# 🚀 Lancement
-#############################################################
-if __name__ == "__main__":
-    main()
+# ---- LEFT: Reference & Proof capture ----
+with left:
+    st.markdown('<div class="section-title">1) Reference capture</div>', unsafe_allow_html=True)
+    col_ref = st.columns([1, 1])
+
+    # Upload reference
+    with col_ref[0]:
+        ref_upload = st.file_uploader("Upload reference photo", type=["jpg", "jpeg", "png"])
+        if ref_upload is not None:
+            img_bgr = bgr_from_file(ref_upload)
+            vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
+            if vec is None:
+                st.error("No face found in the uploaded image.")
+            else:
+                st.session_state.ref_vec = vec
+                st.session_state.ref_img = draw_faces(
+                    img_bgr, hex_to_bgr(st.session_state.rect_hex),
+                    st.session_state.scale_factor, st.session_state.min_neighbors
+                )
+                st.success("Reference saved (from upload).")
+
+    # Camera reference
+    with col_ref[1]:
+        ref_cam = st.camera_input("Or take a reference snapshot")
+        if ref_cam is not None:
+            img_bgr = bgr_from_file(ref_cam)
+            vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
+            if vec is None:
+                st.error("No face detected in the reference snapshot.")
+            else:
+                st.session_state.ref_vec = vec
+                st.session_state.ref_img = draw_faces(
+                    img_bgr, hex_to_bgr(st.session_state.rect_hex),
+                    st.session_state.scale_factor, st.session_state.min_neighbors
+                )
+                st.success("Reference saved (from camera).")
+
+    # Reference preview + clear
+    if st.session_state.ref_img is not None:
+        st.image(cv2.cvtColor(st.session_state.ref_img, cv2.COLOR_BGR2RGB),
+                 caption="Reference", use_container_width=True)
+        if st.button("🧹 Clear reference"):
+            st.session_state.ref_vec = None
+            st.session_state.ref_img = None
+            st.session_state.last_result = None
+            st.success("Reference cleared.")
+
+    st.markdown('---')
+    st.markdown('<div class="section-title">2) Proof snapshot</div>', unsafe_allow_html=True)
+    proof_cam = st.camera_input("Take a proof snapshot for verification")
+
+    st.markdown('---')
+    st.markdown('<div class="section-title">3) Verify</div>', unsafe_allow_html=True)
+    if st.button("✅ Verify identity"):
+        if st.session_state.ref_vec is None:
+            st.warning("Please set a reference first (upload or camera).")
+        elif proof_cam is None:
+            st.warning("Please take a proof snapshot.")
+        else:
+            proof_bgr = bgr_from_file(proof_cam)
+            curr_vec = face_vector_from_bgr(proof_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
+            if curr_vec is None:
+                st.error("No face detected in the proof snapshot.")
+            else:
+                sim = cosine_similarity(st.session_state.ref_vec, curr_vec)
+                sim_clip = float(np.clip(sim, 0.0, 1.0))
+                percent = sim_clip * 100.0
+                passed = sim >= st.session_state.threshold
+
+                st.session_state.last_result = {
+                    "similarity": sim,
+                    "percent": percent,
+                    "threshold": st.session_state.threshold,
+                    "passed": passed,
+                }
+                st.success("Verification computed. See the result panel on the right.")
+
+    # Optional disk save (explicit consent)
+    if st.session_state.allow_persist:
+        if st.session_state.ref_img is not None:
+            ok, buf = cv2.imencode(".png", st.session_state.ref_img)
+            st.download_button("⬇️ Download reference (PNG)", data=buf.tobytes(),
+                               file_name="reference.png", mime="image/png")
+        if proof_cam is not None:
+            proof_bgr = bgr_from_file(proof_cam)
+            ok, buf = cv2.imencode(".png", proof_bgr)
+            st.download_button("⬇️ Download proof (PNG)", data=buf.tobytes(),
+                               file_name="proof.png", mime="image/png")
+
+# ===================== NOTES =====================
+st.markdown(
+    """
+<div class="card">
+  <div class="section-title">Security & PoC scope</div>
+  <ul class="muted">
+    <li>No continuous streaming — browser prompts for camera permission per snapshot.</li>
+    <li>No disk write by default (toggle in sidebar if you need downloads).</li>
+    <li>For production KYC/IDV: use robust face embeddings (e.g., InsightFace) and liveness detection.</li>
+  </ul>
+</div>
+    """,
+    unsafe_allow_html=True,
+)
