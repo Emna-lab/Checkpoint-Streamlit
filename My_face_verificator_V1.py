@@ -1,11 +1,12 @@
 # My_face_verificator_V1.py
 # ----------------------------------------------------------
-# Face Verification (PoC) — Streamlit + OpenCV (Cloud-ready)
-# - Caméra via st.camera_input (compatible Streamlit Cloud)
-# - Un seul contrôle central pour ON/OFF de la caméra "Proof"
-# - Référence : upload OU snapshot
-# - Détection Haar (boîtes tracées après capture)
-# - UI simple, pédagogique, résultats synchrones
+# Face Verification (PoC) — Streamlit + OpenCV (Cloud & Local)
+# - Deux caméras indépendantes (Référence & Proof) avec ON/OFF
+# - Bouton global ON/OFF pour les deux
+# - Cloud: st.camera_input (cadran-guide statique à côté de la caméra)
+# - Local (optionnel): petite fenêtre OpenCV de guide (preview) si désiré
+# - Snapshot affiché à droite (pas sous la caméra)
+# - Actions Verify / Clear sans double-clic (MAJ immédiate via session_state)
 # ----------------------------------------------------------
 
 from pathlib import Path
@@ -15,7 +16,7 @@ import cv2
 import numpy as np
 import streamlit as st
 
-# ===================== PAGE & STYLE =====================
+# ============ PAGE & STYLE ============
 st.set_page_config(page_title="BankID • Face Verification (PoC)", page_icon="🏦", layout="wide")
 st.markdown(
     """
@@ -31,14 +32,15 @@ st.markdown(
       .ko { background:#fef2f2; color:#991b1b; border-color:#fecaca;}
       .metric { font-size:1.6rem; font-weight:800; }
       .muted { color:#64748b; }
-      .guide { border: 2px dashed #94a3b8; border-radius: 12px; padding: 8px; text-align:center; color:#64748b; }
+      .guide { border: 2px dashed #94a3b8; border-radius: 12px; padding: 10px; text-align:center; color:#64748b; height: 100%; }
       .centered-btns { display:flex; gap:.5rem; }
+      .cam-box {border:1px solid #e5e7eb; border-radius:10px; padding:10px; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ===================== ENTÊTE =====================
+# ============ ENTÊTE ============
 st.markdown(
     """
     <div class="app-header">
@@ -49,7 +51,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ===================== HAAR CASCADE =====================
+# ============ HAAR CASCADE ============
 CASCADE_FILE = "haarcascade_frontalface_default.xml"
 local_path = Path(__file__).parent / CASCADE_FILE
 opencv_path = Path(cv2.data.haarcascades) / CASCADE_FILE
@@ -70,7 +72,7 @@ if face_cascade.empty():
     st.error("❌ Haar cascade failed to load (file may be corrupted).")
     st.stop()
 
-# ===================== HELPERS =====================
+# ============ HELPERS ============
 def hex_to_bgr(hex_color: str) -> Tuple[int, int, int]:
     """Convert '#RRGGBB' to OpenCV BGR tuple."""
     r = int(hex_color[1:3], 16)
@@ -136,55 +138,63 @@ def show_bgr_image(bgr: Optional[np.ndarray], caption: str):
     img_rgb = bgr[:, :, ::-1]
     try:
         st.image(img_rgb, caption=caption, use_container_width=True)
-    except TypeError:
+    except TypeError:  # older Streamlit
         st.image(img_rgb, caption=caption, use_column_width=True)
 
-# ===================== STATE (defaults) =====================
+# ============ STATE (défauts) ============
 defaults = {
-    # Images & vectors
-    "ref_img": None,        # BGR with rectangles (reference)
-    "ref_img_raw": None,    # raw BGR (reference, sans rectangles) pour extraction robuste
-    "proof_img": None,      # BGR with rectangles (proof)
-    "proof_img_raw": None,  # raw BGR (proof, sans rectangles)
-    "ref_vec": None,        # reference face vector
-    "last_sim": None,       # last similarity
+    # images & vecteurs
+    "ref_img": None,
+    "ref_img_raw": None,
+    "ref_vec": None,
 
-    # Unique camera control for PROOF
+    "proof_img": None,
+    "proof_img_raw": None,
+
+    # ON/OFF caméras (cloud)
+    "ref_camera_on": False,
     "proof_camera_on": False,
 
-    # Detection params
+    # paramètres détection & décision
     "scale_factor": 1.30,
     "min_neighbors": 5,
     "rect_hex": "#2563eb",
     "threshold": 0.86,
 
-    # Consent for saving
+    # consentement pour enregistrer (optionnel)
     "allow_persist": False,
+
+    # dernier résultat
+    "last_sim": None,
+
+    # mode local (preview OpenCV facultatif)
+    "local_preview": False,
 }
 for k, v in defaults.items():
     st.session_state.setdefault(k, v)
 
-# ===================== INSTRUCTIONS =====================
+# ============ INSTRUCTIONS ============
 st.markdown(
     """
 <div class="card">
-  <div class="section-title">How it works (snapshot & consent)</div>
+  <div class="section-title">How it works</div>
   <ul class="muted">
-    <li>📌 <b>Reference</b>: upload a photo <i>or</i> take a snapshot with your camera.</li>
-    <li>📌 <b>Proof</b>: turn the camera ON (single control below), capture a snapshot, then turn it OFF.</li>
-    <li>🔒 Images stay in memory (no disk) unless you explicitly enable saving.</li>
+    <li>📌 <b>Reference</b>: start the camera or upload a photo, then capture the snapshot.</li>
+    <li>📌 <b>Proof</b>: start the camera, capture a snapshot, then you can stop the camera.</li>
+    <li>🎯 The guidance frame helps you center your face before taking the photo.</li>
+    <li>🔒 Images stay in memory (no disk) unless you enable saving (sidebar).</li>
   </ul>
 </div>
     """,
     unsafe_allow_html=True,
 )
 
-# ===================== SIDEBAR (PARAMS) =====================
+# ============ SIDEBAR (PARAMS) ============
 with st.sidebar:
     st.header("Verification parameters")
 
     st.session_state.rect_hex = st.color_picker("Rectangle color", st.session_state.rect_hex)
-    st.caption("Visual only — color of the detection boxes.")
+    st.caption("Visual only — color of detection boxes.")
 
     st.session_state.scale_factor = st.slider("scaleFactor", 1.05, 1.60, st.session_state.scale_factor, 0.01)
     st.caption("Image scaling step used by the detector. Typical: 1.1–1.4.")
@@ -196,15 +206,31 @@ with st.sidebar:
     st.caption("Similarity ≥ threshold ⇒ PASS. Higher threshold = stricter.")
 
     st.divider()
+    st.header("Capture controls")
+    # Bouton global : ON/OFF les 2 caméras
+    colg1, colg2 = st.columns(2)
+    with colg1:
+        if st.button("Start BOTH"):
+            st.session_state.ref_camera_on = True
+            st.session_state.proof_camera_on = True
+    with colg2:
+        if st.button("Stop BOTH"):
+            st.session_state.ref_camera_on = False
+            st.session_state.proof_camera_on = False
+
+    st.divider()
     st.header("Security (PoC)")
     st.session_state.allow_persist = st.checkbox("Allow saving images to disk (snapshots/)", value=False)
-    st.caption("If unchecked (default), images stay in memory and are discarded on refresh.")
+    st.caption("If unchecked, images stay in memory and are discarded on refresh.")
 
-# ===================== LAYOUT =====================
-left, right = st.columns([7, 5])
+    st.divider()
+    st.header("Local preview (Optional)")
+    st.session_state.local_preview = st.checkbox("OpenCV guide window (local run only)", value=False)
+    st.caption("Works on local PyCharm only (not on Streamlit Cloud).")
 
-# ---- RIGHT: RESULT ----
-with right:
+# ============ RESULT PANEL (droite) ============
+right_col, = st.columns([1])
+with right_col:
     st.markdown('<div class="section-title">Verification result</div>', unsafe_allow_html=True)
     if st.session_state.last_sim is None:
         st.caption("Capture a reference and a proof, then click **Verify**.")
@@ -233,32 +259,45 @@ with right:
 
         st.caption("Cosine similarity on 128×128 grayscale face crops. % is clipped to [0–100].")
 
-# ---- LEFT: Reference & Proof capture ----
-with left:
-    # ===== 1) REFERENCE =====
-    st.markdown('<div class="section-title">1) Reference capture</div>', unsafe_allow_html=True)
+st.markdown("---")
 
-    # Upload
-    ref_upload = st.file_uploader("Upload reference photo", type=["jpg", "jpeg", "png"])
-    if ref_upload is not None:
-        img_bgr = bgr_from_file(ref_upload)
-        vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
-        if vec is None:
-            st.error("No face found in the uploaded image.")
+# ============ REFERENCE (caméra à gauche, snapshot à droite) ============
+st.markdown('<div class="section-title">1) Reference</div>', unsafe_allow_html=True)
+ref_cam_col, ref_snap_col = st.columns([2, 1])
+
+with ref_cam_col:
+    st.markdown("**Camera control (Reference)**")
+    cc1, cc2, cc3 = st.columns(3)
+    with cc1:
+        if not st.session_state.ref_camera_on and st.button("▶️ Start REF"):
+            st.session_state.ref_camera_on = True
+    with cc2:
+        if st.session_state.ref_camera_on and st.button("⏹ Stop REF"):
+            st.session_state.ref_camera_on = False
+    with cc3:
+        if st.button("🧹 Clear REF"):
+            st.session_state.ref_img = None
+            st.session_state.ref_img_raw = None
+            st.session_state.ref_vec = None
+            st.session_state.last_sim = None  # reset immédiat
+            st.success("Reference cleared.")
+
+    # Cloud-safe camera_input
+    cam_ref_file = None
+    guide_col1, guide_col2 = st.columns([3, 2])
+    with guide_col1:
+        st.markdown('<div class="cam-box">', unsafe_allow_html=True)
+        if st.session_state.ref_camera_on:
+            cam_ref_file = st.camera_input("Reference camera")
         else:
-            st.session_state.ref_vec = vec
-            st.session_state.ref_img_raw = img_bgr
-            st.session_state.ref_img = draw_faces(
-                img_bgr, hex_to_bgr(st.session_state.rect_hex),
-                st.session_state.scale_factor, st.session_state.min_neighbors
-            )
-            st.session_state.last_sim = None  # reset
-            st.success("Reference saved (from upload).")
+            st.info("Reference camera is OFF")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with guide_col2:
+        st.markdown("<div class='guide'>Center your face in this frame, then capture.</div>", unsafe_allow_html=True)
 
-    # Camera (simple snapshot)
-    cam_ref = st.camera_input("Or take a reference snapshot")
-    if cam_ref is not None:
-        img_bgr = bgr_from_file(cam_ref)
+    # Si snapshot pris, on enregistre immédiatement
+    if cam_ref_file is not None:
+        img_bgr = bgr_from_file(cam_ref_file)
         vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
         if vec is None:
             st.error("No face detected in the reference snapshot.")
@@ -269,99 +308,109 @@ with left:
                 img_bgr, hex_to_bgr(st.session_state.rect_hex),
                 st.session_state.scale_factor, st.session_state.min_neighbors
             )
-            st.session_state.last_sim = None  # reset
-            st.success("Reference saved (from camera).")
+            st.session_state.last_sim = None  # reset immédiat
+            st.success("Reference saved.")
 
-    # Preview + clear
+with ref_snap_col:
     show_bgr_image(st.session_state.ref_img, caption="Reference (detected)")
-    if st.session_state.ref_img is not None:
-        if st.button("🧹 Clear reference"):
-            st.session_state.ref_img = None
-            st.session_state.ref_img_raw = None
-            st.session_state.ref_vec = None
-            st.session_state.last_sim = None
-            st.success("Reference cleared.")
 
-    st.markdown('---')
+# ============ PROOF (caméra à gauche, snapshot à droite) ============
+st.markdown('<div class="section-title">2) Proof</div>', unsafe_allow_html=True)
+proof_cam_col, proof_snap_col = st.columns([2, 1])
 
-    # ===== 2) PROOF =====
-    st.markdown('<div class="section-title">2) Proof (single camera control)</div>', unsafe_allow_html=True)
-
-    # Un seul contrôle central pour la caméra Proof : ON/OFF
-    cols_ctrl = st.columns(2)
-    with cols_ctrl[0]:
-        if not st.session_state.proof_camera_on and st.button("▶️ Start proof camera"):
+with proof_cam_col:
+    st.markdown("**Camera control (Proof)**")
+    pc1, pc2, pc3 = st.columns(3)
+    with pc1:
+        if not st.session_state.proof_camera_on and st.button("▶️ Start PROOF"):
             st.session_state.proof_camera_on = True
-    with cols_ctrl[1]:
-        if st.session_state.proof_camera_on and st.button("⏹ Stop proof camera"):
+    with pc2:
+        if st.session_state.proof_camera_on and st.button("⏹ Stop PROOF"):
             st.session_state.proof_camera_on = False
-            st.info("Proof camera turned OFF.")
-
-    # Guide visuel (cadran) — info utilisateur
-    st.markdown("<div class='guide'>Center your face, look straight, good lighting. Then capture.</div>", unsafe_allow_html=True)
-
-    proof_snap = None
-    if st.session_state.proof_camera_on:
-        proof_snap = st.camera_input("Capture a proof snapshot")
-
-    # Si on a capturé : stocker la raw et la version avec rectangles
-    if proof_snap is not None:
-        img_bgr = bgr_from_file(proof_snap)
-        st.session_state.proof_img_raw = img_bgr
-        st.session_state.proof_img = draw_faces(
-            img_bgr, hex_to_bgr(st.session_state.rect_hex),
-            st.session_state.scale_factor, st.session_state.min_neighbors
-        )
-        st.session_state.last_sim = None  # reset jusqu’à vérification
-        st.success("Proof snapshot captured.")
-
-    # Aperçu + Clear (pour retirer l’aperçu proof restant)
-    show_bgr_image(st.session_state.proof_img, caption="Proof (detected)")
-    if st.session_state.proof_img is not None:
-        if st.button("🧹 Clear proof"):
+    with pc3:
+        if st.button("🧹 Clear PROOF"):
             st.session_state.proof_img = None
             st.session_state.proof_img_raw = None
             st.session_state.last_sim = None
             st.success("Proof cleared.")
 
-    st.markdown('---')
-
-    # ===== 3) VERIFY =====
-    st.markdown('<div class="section-title">3) Verify</div>', unsafe_allow_html=True)
-    if st.button("✅ Verify identity"):
-        if st.session_state.ref_vec is None:
-            st.warning("Please set a reference first (upload or camera).")
-        elif st.session_state.proof_img_raw is None:
-            st.warning("Please take a proof snapshot.")
+    cam_proof_file = None
+    guide2_col1, guide2_col2 = st.columns([3, 2])
+    with guide2_col1:
+        st.markdown('<div class="cam-box">', unsafe_allow_html=True)
+        if st.session_state.proof_camera_on:
+            cam_proof_file = st.camera_input("Proof camera")
         else:
-            # IMPORTANT : on extrait le vecteur depuis la version "raw" (sans rectangles)
-            vec = face_vector_from_bgr(
-                st.session_state.proof_img_raw,
-                st.session_state.scale_factor,
-                st.session_state.min_neighbors,
-            )
-            if vec is None:
-                st.error("No face detected in the proof snapshot.")
-            else:
-                st.session_state.last_sim = cosine_similarity(st.session_state.ref_vec, vec)
-                st.success("Verification computed. See the result panel on the right.")
+            st.info("Proof camera is OFF")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with guide2_col2:
+        st.markdown("<div class='guide'>Align your face inside this frame, then capture.</div>", unsafe_allow_html=True)
 
-    # Sauvegarde optionnelle (consentement explicite)
-    if st.session_state.allow_persist:
-        from datetime import datetime
-        save_dir = Path("snapshots"); save_dir.mkdir(exist_ok=True)
-        if st.session_state.ref_img is not None:
-            cv2.imwrite(str(save_dir / f"reference_{datetime.now():%Y%m%d_%H%M%S}.png"), st.session_state.ref_img)
-        if st.session_state.proof_img is not None:
-            cv2.imwrite(str(save_dir / f"proof_{datetime.now():%Y%m%d_%H%M%S}.png"), st.session_state.proof_img)
+    if cam_proof_file is not None:
+        img_bgr = bgr_from_file(cam_proof_file)
+        st.session_state.proof_img_raw = img_bgr
+        st.session_state.proof_img = draw_faces(
+            img_bgr, hex_to_bgr(st.session_state.rect_hex),
+            st.session_state.scale_factor, st.session_state.min_neighbors
+        )
+        st.session_state.last_sim = None
+        st.success("Proof snapshot captured.")
 
-# ===================== NOTES =====================
+with proof_snap_col:
+    show_bgr_image(st.session_state.proof_img, caption="Proof (detected)")
+
+# ============ VERIFY ============
+st.markdown('<div class="section-title">3) Verify</div>', unsafe_allow_html=True)
+if st.button("✅ Verify identity"):
+    if st.session_state.ref_vec is None:
+        st.warning("Please set a reference first (upload or camera).")
+    elif st.session_state.proof_img_raw is None:
+        st.warning("Please take a proof snapshot.")
+    else:
+        vec = face_vector_from_bgr(
+            st.session_state.proof_img_raw,
+            st.session_state.scale_factor,
+            st.session_state.min_neighbors,
+        )
+        if vec is None:
+            st.error("No face detected in the proof snapshot.")
+        else:
+            st.session_state.last_sim = cosine_similarity(st.session_state.ref_vec, vec)
+            st.success("Verification computed. See the result panel above.")
+
+# ============ LOCAL PREVIEW (OPTIONNEL, PyCharm uniquement) ============
+# Petite fenêtre OpenCV de guide (non utilisée sur Streamlit Cloud)
+if st.session_state.local_preview:
+    if st.button("Open local guide window (ESC to close)"):
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            st.error("❌ Unable to open local webcam.")
+        else:
+            try:
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    h, w = frame.shape[:2]
+                    # simple guide rectangle centré
+                    gh, gw = int(h * 0.6), int(w * 0.6)
+                    y1 = (h - gh) // 2; y2 = y1 + gh
+                    x1 = (w - gw) // 2; x2 = x1 + gw
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (100, 200, 255), 2)
+                    cv2.imshow("Local guide — press ESC to close", frame)
+                    if cv2.waitKey(1) & 0xFF == 27:  # ESC
+                        break
+            finally:
+                cap.release()
+                cv2.destroyAllWindows()
+
+# ============ NOTES ============
 st.markdown(
     """
 <div class="card">
   <div class="section-title">Notes (PoC)</div>
   <ul class="muted">
-    <li>This is a didactic baseline (cosine on grayscale crops) to illustrate a verification flow.</li>
+    <li>This is a didactic baseline to illustrate a verification flow.</li>
     <li>Images are kept in memory only, unless you enable saving in the sidebar.</li>
   </ul>
 </div>
