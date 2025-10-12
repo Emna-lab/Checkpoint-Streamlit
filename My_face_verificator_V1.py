@@ -1,10 +1,11 @@
 # My_face_verificator_V1.py
 # ----------------------------------------------------------
-# Face Verification (PoC) — Streamlit + OpenCV
-# - Référence : upload OU snapshot (Start/Stop)
-# - Proof : live preview (desktop) non bloquant (mono-frame + auto-refresh) + snapshot cloud
-# - Boutons Clear (référence / proof)
-# - Sidebar pédagogique + résultats synchrones
+# Face Verification (PoC) — Streamlit + OpenCV (Cloud-ready)
+# - Caméra via st.camera_input (compatible Streamlit Cloud)
+# - Un seul contrôle central pour ON/OFF de la caméra "Proof"
+# - Référence : upload OU snapshot
+# - Détection Haar (boîtes tracées après capture)
+# - UI simple, pédagogique, résultats synchrones
 # ----------------------------------------------------------
 
 from pathlib import Path
@@ -30,6 +31,8 @@ st.markdown(
       .ko { background:#fef2f2; color:#991b1b; border-color:#fecaca;}
       .metric { font-size:1.6rem; font-weight:800; }
       .muted { color:#64748b; }
+      .guide { border: 2px dashed #94a3b8; border-radius: 12px; padding: 8px; text-align:center; color:#64748b; }
+      .centered-btns { display:flex; gap:.5rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -127,7 +130,7 @@ def draw_faces(bgr: np.ndarray, color_bgr: Tuple[int, int, int],
     return out
 
 def show_bgr_image(bgr: Optional[np.ndarray], caption: str):
-    """Display BGR → RGB with fallback for older Streamlit."""
+    """Display BGR → RGB; compat `use_container_width`/`use_column_width`."""
     if bgr is None:
         return
     img_rgb = bgr[:, :, ::-1]
@@ -139,14 +142,15 @@ def show_bgr_image(bgr: Optional[np.ndarray], caption: str):
 # ===================== STATE (defaults) =====================
 defaults = {
     # Images & vectors
-    "ref_img": None,      # BGR with rectangles (reference)
-    "proof_img": None,    # BGR (current proof)
-    "ref_vec": None,      # reference face vector
-    "last_sim": None,     # last similarity
+    "ref_img": None,        # BGR with rectangles (reference)
+    "ref_img_raw": None,    # raw BGR (reference, sans rectangles) pour extraction robuste
+    "proof_img": None,      # BGR with rectangles (proof)
+    "proof_img_raw": None,  # raw BGR (proof, sans rectangles)
+    "ref_vec": None,        # reference face vector
+    "last_sim": None,       # last similarity
 
-    # Cameras
-    "ref_cam_on": False,          # reference camera mode
-    "proof_preview_on": False,    # proof live preview flag (non-blocking)
+    # Unique camera control for PROOF
+    "proof_camera_on": False,
 
     # Detection params
     "scale_factor": 1.30,
@@ -167,7 +171,7 @@ st.markdown(
   <div class="section-title">How it works (snapshot & consent)</div>
   <ul class="muted">
     <li>📌 <b>Reference</b>: upload a photo <i>or</i> take a snapshot with your camera.</li>
-    <li>📌 <b>Proof</b>: use <i>live preview (desktop)</i> with detection boxes and capture, or a simple snapshot.</li>
+    <li>📌 <b>Proof</b>: turn the camera ON (single control below), capture a snapshot, then turn it OFF.</li>
     <li>🔒 Images stay in memory (no disk) unless you explicitly enable saving.</li>
   </ul>
 </div>
@@ -183,7 +187,7 @@ with st.sidebar:
     st.caption("Visual only — color of the detection boxes.")
 
     st.session_state.scale_factor = st.slider("scaleFactor", 1.05, 1.60, st.session_state.scale_factor, 0.01)
-    st.caption("Image scaling step used by the detector. Typical values: 1.1–1.4.")
+    st.caption("Image scaling step used by the detector. Typical: 1.1–1.4.")
 
     st.session_state.min_neighbors = st.slider("minNeighbors", 1, 12, st.session_state.min_neighbors, 1)
     st.caption("Higher → fewer false detections, requires a stabler face.")
@@ -243,40 +247,37 @@ with left:
             st.error("No face found in the uploaded image.")
         else:
             st.session_state.ref_vec = vec
+            st.session_state.ref_img_raw = img_bgr
             st.session_state.ref_img = draw_faces(
                 img_bgr, hex_to_bgr(st.session_state.rect_hex),
                 st.session_state.scale_factor, st.session_state.min_neighbors
             )
+            st.session_state.last_sim = None  # reset
             st.success("Reference saved (from upload).")
 
-    # Camera (start/stop)
-    if not st.session_state.ref_cam_on:
-        if st.button("▶️ Start camera (reference)"):
-            st.session_state.ref_cam_on = True
-            st.rerun()
-    else:
-        ref_cam = st.camera_input("Take a reference snapshot")
-        if st.button("⏹ Stop camera (reference)"):
-            st.session_state.ref_cam_on = False
-            st.rerun()
-        if ref_cam is not None:
-            img_bgr = bgr_from_file(ref_cam)
-            vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
-            if vec is None:
-                st.error("No face detected in the reference snapshot.")
-            else:
-                st.session_state.ref_vec = vec
-                st.session_state.ref_img = draw_faces(
-                    img_bgr, hex_to_bgr(st.session_state.rect_hex),
-                    st.session_state.scale_factor, st.session_state.min_neighbors
-                )
-                st.success("Reference saved (from camera).")
+    # Camera (simple snapshot)
+    cam_ref = st.camera_input("Or take a reference snapshot")
+    if cam_ref is not None:
+        img_bgr = bgr_from_file(cam_ref)
+        vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
+        if vec is None:
+            st.error("No face detected in the reference snapshot.")
+        else:
+            st.session_state.ref_vec = vec
+            st.session_state.ref_img_raw = img_bgr
+            st.session_state.ref_img = draw_faces(
+                img_bgr, hex_to_bgr(st.session_state.rect_hex),
+                st.session_state.scale_factor, st.session_state.min_neighbors
+            )
+            st.session_state.last_sim = None  # reset
+            st.success("Reference saved (from camera).")
 
     # Preview + clear
     show_bgr_image(st.session_state.ref_img, caption="Reference (detected)")
     if st.session_state.ref_img is not None:
         if st.button("🧹 Clear reference"):
             st.session_state.ref_img = None
+            st.session_state.ref_img_raw = None
             st.session_state.ref_vec = None
             st.session_state.last_sim = None
             st.success("Reference cleared.")
@@ -284,60 +285,42 @@ with left:
     st.markdown('---')
 
     # ===== 2) PROOF =====
-    st.markdown('<div class="section-title">2) Proof (with live preview on desktop)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">2) Proof (single camera control)</div>', unsafe_allow_html=True)
 
-    # --- Live preview (non-bloquant) : 1 frame / rerun + auto-refresh ---
-    # On utilise st_autorefresh pour re-rendre périodiquement l'écran tant que le mode est ON.
-    from streamlit_autorefresh import st_autorefresh  # petite lib utile pour l’auto-refresh
+    # Un seul contrôle central pour la caméra Proof : ON/OFF
+    cols_ctrl = st.columns(2)
+    with cols_ctrl[0]:
+        if not st.session_state.proof_camera_on and st.button("▶️ Start proof camera"):
+            st.session_state.proof_camera_on = True
+    with cols_ctrl[1]:
+        if st.session_state.proof_camera_on and st.button("⏹ Stop proof camera"):
+            st.session_state.proof_camera_on = False
+            st.info("Proof camera turned OFF.")
 
-    live_cols = st.columns(3)
-    if not st.session_state.proof_preview_on:
-        if live_cols[0].button("▶️ Start live preview (desktop)"):
-            st.session_state.proof_preview_on = True
-            st.rerun()
-    else:
-        # auto-refresh ~12 fps (≈ 80 ms)
-        st_autorefresh(interval=80, key="proof_refresh")
+    # Guide visuel (cadran) — info utilisateur
+    st.markdown("<div class='guide'>Center your face, look straight, good lighting. Then capture.</div>", unsafe_allow_html=True)
 
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            st.warning("Live preview is available on desktop only (cannot access webcam on the cloud).")
-            st.session_state.proof_preview_on = False
-        else:
-            ok, frame = cap.read()
-            cap.release()
-            if ok:
-                frame_out = draw_faces(frame, hex_to_bgr(st.session_state.rect_hex),
-                                       st.session_state.scale_factor, st.session_state.min_neighbors)
-                show_bgr_image(frame_out, caption="Live proof preview (desktop)")
-                # mémorise la dernière frame brute pour capture
-                st.session_state["_last_preview_frame"] = frame.copy()
+    proof_snap = None
+    if st.session_state.proof_camera_on:
+        proof_snap = st.camera_input("Capture a proof snapshot")
 
-        # Contrôles
-        if live_cols[1].button("📸 Capture current frame"):
-            frame = st.session_state.get("_last_preview_frame")
-            if frame is None:
-                st.warning("No frame available yet, please wait a moment.")
-            else:
-                st.session_state.proof_img = frame.copy()
-                st.success("Proof snapshot captured from live preview.")
-        if live_cols[2].button("⏹ Stop preview"):
-            st.session_state.proof_preview_on = False
-            st.rerun()
-
-    # --- Alternative Cloud : snapshot simple ---
-    st.caption("If live preview is unavailable, use the snapshot below:")
-    proof_cam = st.camera_input("Take a proof snapshot (cloud-friendly)")
-    if proof_cam is not None:
-        img_bgr = bgr_from_file(proof_cam)
-        st.session_state.proof_img = img_bgr
+    # Si on a capturé : stocker la raw et la version avec rectangles
+    if proof_snap is not None:
+        img_bgr = bgr_from_file(proof_snap)
+        st.session_state.proof_img_raw = img_bgr
+        st.session_state.proof_img = draw_faces(
+            img_bgr, hex_to_bgr(st.session_state.rect_hex),
+            st.session_state.scale_factor, st.session_state.min_neighbors
+        )
+        st.session_state.last_sim = None  # reset jusqu’à vérification
         st.success("Proof snapshot captured.")
 
-    # Affichage + bouton Clear proof (pour retirer la photo brute)
-    show_bgr_image(st.session_state.proof_img, caption="Proof (current)")
+    # Aperçu + Clear (pour retirer l’aperçu proof restant)
+    show_bgr_image(st.session_state.proof_img, caption="Proof (detected)")
     if st.session_state.proof_img is not None:
         if st.button("🧹 Clear proof"):
             st.session_state.proof_img = None
+            st.session_state.proof_img_raw = None
             st.session_state.last_sim = None
             st.success("Proof cleared.")
 
@@ -348,11 +331,12 @@ with left:
     if st.button("✅ Verify identity"):
         if st.session_state.ref_vec is None:
             st.warning("Please set a reference first (upload or camera).")
-        elif st.session_state.proof_img is None:
-            st.warning("Please take a proof snapshot (live or snapshot).")
+        elif st.session_state.proof_img_raw is None:
+            st.warning("Please take a proof snapshot.")
         else:
+            # IMPORTANT : on extrait le vecteur depuis la version "raw" (sans rectangles)
             vec = face_vector_from_bgr(
-                st.session_state.proof_img,
+                st.session_state.proof_img_raw,
                 st.session_state.scale_factor,
                 st.session_state.min_neighbors,
             )
@@ -360,13 +344,6 @@ with left:
                 st.error("No face detected in the proof snapshot.")
             else:
                 st.session_state.last_sim = cosine_similarity(st.session_state.ref_vec, vec)
-                # Dessine aussi les boîtes sur la preuve affichée
-                st.session_state.proof_img = draw_faces(
-                    st.session_state.proof_img,
-                    hex_to_bgr(st.session_state.rect_hex),
-                    st.session_state.scale_factor,
-                    st.session_state.min_neighbors,
-                )
                 st.success("Verification computed. See the result panel on the right.")
 
     # Sauvegarde optionnelle (consentement explicite)
