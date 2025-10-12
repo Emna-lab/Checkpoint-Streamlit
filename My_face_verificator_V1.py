@@ -1,15 +1,16 @@
-# bank_face_verify_poc_liveproof.py
+# My_face_verificator_V1.py
 # ----------------------------------------------------------
 # Face Verification (PoC) — Streamlit + OpenCV
-# + Live preview (desktop only) with detection boxes for PROOF
-# + Clear proof button
+# - Référence : upload OU snapshot (Start/Stop)
+# - Proof : live preview (desktop) avec boîtes + snapshot cloud-friendly
+# - Boutons Clear (référence / proof)
+# - Sidebar pédagogique
 # ----------------------------------------------------------
-from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional, Tuple
-
 import time
+
 import cv2
 import numpy as np
 import streamlit as st
@@ -69,12 +70,14 @@ if face_cascade.empty():
 
 # ===================== HELPERS =====================
 def hex_to_bgr(hex_color: str) -> Tuple[int, int, int]:
+    """Convertit une couleur HEX ('#RRGGBB') en tuple BGR pour OpenCV."""
     r = int(hex_color[1:3], 16)
     g = int(hex_color[3:5], 16)
     b = int(hex_color[5:7], 16)
     return (b, g, r)
 
 def largest_face_bbox(gray: np.ndarray, scale_factor: float, min_neighbors: int):
+    """Retourne la plus grande boîte de visage détectée (ou None)."""
     faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
     if len(faces) == 0:
         return None
@@ -86,13 +89,13 @@ def face_vector_from_bgr(
     min_neighbors: int,
     size: int = 128,
 ) -> Optional[np.ndarray]:
-    """Vecteur visage (128x128 gris L2-normalisé) du PLUS grand visage détecté."""
+    """Extrait un vecteur visage (grayscale 128x128 aplati, L2-normalisé) pour le plus grand visage."""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     bbox = largest_face_bbox(gray, scale_factor, min_neighbors)
     if bbox is None:
         return None
     x, y, w, h = bbox
-    crop = gray[y : y + h, x : x + w]
+    crop = gray[y:y+h, x:x+w]
     crop = cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA)
     vec = crop.astype(np.float32).ravel()
     norm = np.linalg.norm(vec)
@@ -101,11 +104,11 @@ def face_vector_from_bgr(
     return vec / norm
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Cosine = produit scalaire car les vecteurs sont normalisés."""
+    """Cosine similarity. Avec des vecteurs L2-normalisés, c'est un simple produit scalaire."""
     return float(np.dot(a, b))
 
 def bgr_from_file(file) -> Optional[np.ndarray]:
-    """Lit un upload / camera_input vers un tableau BGR."""
+    """Lit un upload (ou camera_input) en image BGR (np.ndarray)."""
     if file is None:
         return None
     data = file.getvalue() if hasattr(file, "getvalue") else file.read()
@@ -117,6 +120,7 @@ def bgr_from_file(file) -> Optional[np.ndarray]:
 
 def draw_faces(bgr: np.ndarray, color_bgr: Tuple[int, int, int],
                scale_factor: float, min_neighbors: int) -> np.ndarray:
+    """Dessine des rectangles sur toutes les faces détectées."""
     out = bgr.copy()
     gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
@@ -125,7 +129,7 @@ def draw_faces(bgr: np.ndarray, color_bgr: Tuple[int, int, int],
     return out
 
 def show_bgr_image(bgr: Optional[np.ndarray], caption: str):
-    """Affiche un BGR → RGB. Compatible toutes versions Streamlit (fallback auto)."""
+    """Affiche un BGR → RGB. Fallback pour anciennes versions de Streamlit."""
     if bgr is None:
         return
     img_rgb = bgr[:, :, ::-1]
@@ -137,43 +141,51 @@ def show_bgr_image(bgr: Optional[np.ndarray], caption: str):
 # ========== LIVE PREVIEW (DESKTOP) POUR LA PROOF ==========
 def live_proof_preview(color_bgr: Tuple[int, int, int], scale: float, neigh: int):
     """
-    Aperçu vidéo local (OpenCV) avec boîtes de détection pour la proof.
-    - Desktop uniquement (PyCharm).
-    - Sur Streamlit Cloud, la webcam côté serveur n'est pas accessible → on affiche un message.
+    Aperçu vidéo local (OpenCV) avec boîtes pour la proof.
+    - Desktop (PyCharm) uniquement : accès webcam côté serveur impossible sur le cloud.
+    - Le bouton Stop est géré DANS la boucle : on vérifie à chaque frame.
     """
-    ph = st.empty()  # conteneur image
+    ph = st.empty()  # conteneur pour l'image
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         st.warning("Live preview is available on desktop only (cannot access webcam on the cloud).")
         return
 
-    try:
-        while st.session_state.get("proof_preview_on", False):
-            ok, frame = cap.read()
-            if not ok:
-                break
-            # Dessin des boîtes
-            frame_out = draw_faces(frame, color_bgr, scale, neigh)
-            # Mémorise la frame brute pour capture ultérieure
-            st.session_state["_last_preview_frame"] = frame.copy()
-            # Affichage
-            img_rgb = frame_out[:, :, ::-1]
-            # même fallback que show_bgr_image, inline pour performance
-            try:
-                ph.image(img_rgb, caption="Live proof preview (desktop)", use_container_width=True)
-            except TypeError:
-                ph.image(img_rgb, caption="Live proof preview (desktop)", use_column_width=True)
-            # Laisse l'UI respirer
-            time.sleep(0.03)
-    finally:
-        cap.release()
-        ph.empty()
+    # bouton stop visible tant que le flux est actif
+    stop_btn = st.button("⏹ Stop preview")
+
+    while st.session_state.get("proof_preview_on", False):
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        # Dessine les boîtes sur la frame affichée
+        frame_out = draw_faces(frame, color_bgr, scale, neigh)
+        # Mémorise la frame brute pour la capture
+        st.session_state["_last_preview_frame"] = frame.copy()
+
+        # Affiche (BGR->RGB) avec fallback
+        img_rgb = frame_out[:, :, ::-1]
+        try:
+            ph.image(img_rgb, caption="Live proof preview (desktop)", use_container_width=True)
+        except TypeError:
+            ph.image(img_rgb, caption="Live proof preview (desktop)", use_column_width=True)
+
+        # Si l'utilisateur a cliqué sur Stop
+        if stop_btn:
+            st.session_state.proof_preview_on = False
+            break
+
+        time.sleep(0.03)
+
+    cap.release()
+    ph.empty()
 
 # ===================== STATE (defaults) =====================
 defaults = {
     "ref_img": None,      # BGR avec rectangles
     "proof_img": None,    # BGR (dernière preuve)
-    "ref_vec": None,      # vecteur visage
+    "ref_vec": None,      # vecteur visage (référence)
     "last_sim": None,     # dernière similarité
 
     "ref_cam_on": False,
@@ -185,8 +197,8 @@ defaults = {
 
     "allow_persist": False,
 
-    "proof_preview_on": False,   # état de l’aperçu vidéo local
-    "_last_preview_frame": None  # dernière frame brute vue dans l’aperçu
+    "proof_preview_on": False,   # état de l’aperçu live
+    "_last_preview_frame": None  # dernière frame brute vue en live
 }
 for k, v in defaults.items():
     st.session_state.setdefault(k, v)
@@ -198,7 +210,7 @@ st.markdown(
   <div class="section-title">How it works (snapshot & consent)</div>
   <ul class="muted">
     <li>📌 <b>Reference</b>: upload a photo <i>or</i> take a snapshot with your camera.</li>
-    <li>📌 <b>Proof</b>: you can use <i>live preview (desktop)</i> with boxes, then capture, or a simple snapshot.</li>
+    <li>📌 <b>Proof</b>: use <i>live preview (desktop)</i> with detection boxes and capture, or a simple snapshot.</li>
     <li>🔒 Images stay in memory (no disk) unless you explicitly enable saving.</li>
   </ul>
 </div>
@@ -211,21 +223,21 @@ with st.sidebar:
     st.header("Verification parameters")
 
     st.session_state.rect_hex = st.color_picker("Rectangle color", st.session_state.rect_hex)
-    st.caption("Purely visual — color of the detection boxes.")
+    st.caption("Visual only — color of the detection boxes.")
 
     st.session_state.scale_factor = st.slider("scaleFactor", 1.05, 1.60, st.session_state.scale_factor, 0.01)
-    st.caption("Controls the image scale pyramid. Typical values 1.1–1.4.")
+    st.caption("Image scaling step used by the detector. Typical values: 1.1–1.4.")
 
     st.session_state.min_neighbors = st.slider("minNeighbors", 1, 12, st.session_state.min_neighbors, 1)
-    st.caption("Higher value = fewer false positives (face must be more stable).")
+    st.caption("Higher → fewer false detections, requires a stabler face.")
 
     st.session_state.threshold = st.slider("Decision threshold (cosine)", 0.50, 0.98, st.session_state.threshold, 0.01)
-    st.caption("Similarity ≥ threshold ⇒ PASS. Higher threshold = stricter decision.")
+    st.caption("Similarity ≥ threshold ⇒ PASS. Higher threshold = stricter.")
 
     st.divider()
     st.header("Security (PoC)")
     st.session_state.allow_persist = st.checkbox("Allow saving images to disk (snapshots/)", value=False)
-    st.caption("If disabled (default), images stay in memory and are discarded on refresh.")
+    st.caption("If unchecked (default), images stay in memory and are discarded on refresh.")
 
 # ===================== LAYOUT =====================
 left, right = st.columns([7, 5])
@@ -325,16 +337,13 @@ with left:
             st.session_state["_last_preview_frame"] = None
             st.rerun()
     else:
-        if col_live[0].button("⏹ Stop preview"):
-            st.session_state.proof_preview_on = False
-            st.rerun()
-        # Lancement de la boucle d'aperçu (dessin des boîtes en direct)
+        # Lance l’aperçu : le bouton Stop est géré dans la boucle
         live_proof_preview(
             color_bgr=hex_to_bgr(st.session_state.rect_hex),
             scale=st.session_state.scale_factor,
             neigh=st.session_state.min_neighbors,
         )
-        # Capture de la frame courante de l’aperçu local
+        # Capture la frame courante
         if col_live[1].button("📸 Capture current frame"):
             frame = st.session_state.get("_last_preview_frame", None)
             if frame is None:
@@ -378,7 +387,7 @@ with left:
                 st.error("No face detected in the proof snapshot.")
             else:
                 st.session_state.last_sim = cosine_similarity(st.session_state.ref_vec, vec)
-                # Dessine aussi les boîtes sur l'image de preuve visible
+                # Dessine aussi les boîtes sur la preuve affichée
                 st.session_state.proof_img = draw_faces(
                     st.session_state.proof_img,
                     hex_to_bgr(st.session_state.rect_hex),
