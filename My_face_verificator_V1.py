@@ -1,4 +1,4 @@
-# bank_face_verify_poc_clean.py
+# bank_face_verify_poc_nestingfix.py
 # ----------------------------------------------------------
 # Face Verification (PoC) — Streamlit + OpenCV (snapshots)
 # ----------------------------------------------------------
@@ -27,6 +27,7 @@ st.markdown(
       .ko { background:#fef2f2; color:#991b1b; border-color:#fecaca;}
       .metric { font-size:1.6rem; font-weight:800; }
       .muted { color:#64748b; }
+      .btn-row > div { display:inline-block; margin-right:.5rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -66,14 +67,12 @@ if face_cascade.empty():
 
 # ===================== HELPERS =====================
 def hex_to_bgr(hex_color: str) -> Tuple[int, int, int]:
-    """#RRGGBB → (B, G, R) for OpenCV drawing."""
     r = int(hex_color[1:3], 16)
     g = int(hex_color[3:5], 16)
     b = int(hex_color[5:7], 16)
     return (b, g, r)
 
 def largest_face_bbox(gray: np.ndarray, scale_factor: float, min_neighbors: int):
-    """Return the bbox (x,y,w,h) of the largest detected face (or None)."""
     faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
     if len(faces) == 0:
         return None
@@ -85,16 +84,12 @@ def face_vector_from_bgr(
     min_neighbors: int,
     size: int = 128,
 ) -> Optional[np.ndarray]:
-    """
-    Extract a simple 128×128 grayscale face vector, L2-normalized.
-    (Pedagogic baseline for a PoC — NOT production grade embeddings.)
-    """
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     bbox = largest_face_bbox(gray, scale_factor, min_neighbors)
     if bbox is None:
         return None
     x, y, w, h = bbox
-    crop = gray[y:y + h, x:x + w]
+    crop = gray[y : y + h, x : x + w]
     crop = cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA)
     vec = crop.astype(np.float32).ravel()
     norm = np.linalg.norm(vec)
@@ -103,11 +98,9 @@ def face_vector_from_bgr(
     return vec / norm
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Cosine similarity for L2-normalized vectors (=-1..1, here ~0..1)."""
     return float(np.dot(a, b))
 
 def bgr_from_file(file) -> Optional[np.ndarray]:
-    """Read a Streamlit upload/camera buffer to a BGR np.ndarray."""
     if file is None:
         return None
     data = file.getvalue() if hasattr(file, "getvalue") else file.read()
@@ -119,7 +112,6 @@ def bgr_from_file(file) -> Optional[np.ndarray]:
 
 def draw_faces(bgr: np.ndarray, color_bgr: Tuple[int, int, int],
                scale_factor: float, min_neighbors: int) -> np.ndarray:
-    """Return a copy with rectangles drawn on detected faces."""
     out = bgr.copy()
     gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
@@ -128,30 +120,25 @@ def draw_faces(bgr: np.ndarray, color_bgr: Tuple[int, int, int],
     return out
 
 def show_bgr_image(bgr: Optional[np.ndarray], caption: str, use_container_width: bool = True):
-    """Safely display a BGR image (if not None)."""
     if bgr is None:
         return
     st.image(bgr[:, :, ::-1], caption=caption, use_container_width=use_container_width)  # BGR→RGB
 
 # ===================== STATE (defaults) =====================
 defaults = {
-    # images & vectors
     "ref_img": None,      # BGR with rectangles
     "proof_img": None,    # BGR (latest proof snapshot)
     "ref_vec": None,      # 128×128 grayscale normalized vector
     "last_sim": None,     # last computed cosine similarity
 
-    # UI toggles for “Start/Stop camera”
     "ref_cam_on": False,
     "proof_cam_on": False,
 
-    # parameters
     "scale_factor": 1.30,
     "min_neighbors": 5,
     "rect_hex": "#2563eb",
     "threshold": 0.86,
 
-    # consent to save
     "allow_persist": False,
 }
 for k, v in defaults.items():
@@ -194,9 +181,9 @@ with st.sidebar:
     st.caption("If disabled (default), images stay in memory and are discarded on refresh.")
 
 # ===================== LAYOUT =====================
-left, right = st.columns([7, 5])
+left, right = st.columns([7, 5])  # <<< SEUL niveau de colonnes
 
-# ---- RIGHT: RESULT (always reflects current threshold) ----
+# ---- RIGHT: RESULT ----
 with right:
     st.markdown('<div class="section-title">Verification result</div>', unsafe_allow_html=True)
     if st.session_state.last_sim is None:
@@ -207,7 +194,7 @@ with right:
         percent = sim_clip * 100.0
         passed = sim >= st.session_state.threshold
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3 = st.columns(3)  # OK (1 seul niveau total)
         with c1:
             st.markdown("**Similarity**")
             st.markdown(f"<div class='metric'>{sim:.3f}</div>", unsafe_allow_html=True)
@@ -230,61 +217,53 @@ with right:
 with left:
     # ===== 1) REFERENCE =====
     st.markdown('<div class="section-title">1) Reference capture</div>', unsafe_allow_html=True)
-    c_ref_top = st.columns([1, 1])
 
-    # A) Upload reference
-    with c_ref_top[0]:
-        ref_upload = st.file_uploader("Upload reference photo", type=["jpg", "jpeg", "png"])
-        if ref_upload is not None:
-            img_bgr = bgr_from_file(ref_upload)
+    # Upload (pas de colonnes imbriquées)
+    ref_upload = st.file_uploader("Upload reference photo", type=["jpg", "jpeg", "png"])
+    if ref_upload is not None:
+        img_bgr = bgr_from_file(ref_upload)
+        vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
+        if vec is None:
+            st.error("No face found in the uploaded image.")
+        else:
+            st.session_state.ref_vec = vec
+            st.session_state.ref_img = draw_faces(
+                img_bgr, hex_to_bgr(st.session_state.rect_hex),
+                st.session_state.scale_factor, st.session_state.min_neighbors
+            )
+            st.success("Reference saved (from upload).")
+
+    # Camera (start/stop)
+    if not st.session_state.ref_cam_on:
+        if st.button("▶️ Start camera (reference)"):
+            st.session_state.ref_cam_on = True
+            st.rerun()
+    else:
+        ref_cam = st.camera_input("Take a reference snapshot")
+        if st.button("⏹ Stop camera (reference)"):
+            st.session_state.ref_cam_on = False
+            st.rerun()
+        if ref_cam is not None:
+            img_bgr = bgr_from_file(ref_cam)
             vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
             if vec is None:
-                st.error("No face found in the uploaded image.")
+                st.error("No face detected in the reference snapshot.")
             else:
                 st.session_state.ref_vec = vec
                 st.session_state.ref_img = draw_faces(
                     img_bgr, hex_to_bgr(st.session_state.rect_hex),
                     st.session_state.scale_factor, st.session_state.min_neighbors
                 )
-                st.success("Reference saved (from upload).")
-
-    # B) Start/Stop camera (reference)
-    with c_ref_top[1]:
-        if not st.session_state.ref_cam_on:
-            if st.button("▶️ Start camera (reference)"):
-                st.session_state.ref_cam_on = True
-                st.rerun()
-        else:
-            ref_cam = st.camera_input("Take a reference snapshot")
-            col_btn = st.columns([1, 1])
-            with col_btn[0]:
-                if st.button("⏹ Stop camera (reference)"):
-                    st.session_state.ref_cam_on = False
-                    st.rerun()
-            if ref_cam is not None:
-                img_bgr = bgr_from_file(ref_cam)
-                vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
-                if vec is None:
-                    st.error("No face detected in the reference snapshot.")
-                else:
-                    st.session_state.ref_vec = vec
-                    st.session_state.ref_img = draw_faces(
-                        img_bgr, hex_to_bgr(st.session_state.rect_hex),
-                        st.session_state.scale_factor, st.session_state.min_neighbors
-                    )
-                    st.success("Reference saved (from camera).")
+                st.success("Reference saved (from camera).")
 
     # Preview + clear
-    preview_cols = st.columns([1, 1])
-    with preview_cols[0]:
-        show_bgr_image(st.session_state.ref_img, caption="Reference (detected)")
-    with preview_cols[1]:
-        if st.session_state.ref_img is not None:
-            if st.button("🧹 Clear reference"):
-                st.session_state.ref_img = None
-                st.session_state.ref_vec = None
-                st.session_state.last_sim = None
-                st.success("Reference cleared.")
+    show_bgr_image(st.session_state.ref_img, caption="Reference (detected)")
+    if st.session_state.ref_img is not None:
+        if st.button("🧹 Clear reference"):
+            st.session_state.ref_img = None
+            st.session_state.ref_vec = None
+            st.session_state.last_sim = None
+            st.success("Reference cleared.")
 
     st.markdown('---')
 
@@ -297,14 +276,11 @@ with left:
             st.rerun()
     else:
         proof_cam = st.camera_input("Take a proof snapshot for verification")
-        col_btn_p = st.columns([1, 1])
-        with col_btn_p[0]:
-            if st.button("⏹ Stop camera (proof)"):
-                st.session_state.proof_cam_on = False
-                st.rerun()
+        if st.button("⏹ Stop camera (proof)"):
+            st.session_state.proof_cam_on = False
+            st.rerun()
         if proof_cam is not None:
             img_bgr = bgr_from_file(proof_cam)
-            # garder l'image brute pour affichage ; les rectangles seront tracés à la vérification
             st.session_state.proof_img = img_bgr
             st.success("Proof snapshot captured.")
 
@@ -320,7 +296,6 @@ with left:
         elif st.session_state.proof_img is None:
             st.warning("Please take a proof snapshot.")
         else:
-            # compute vector for the current proof
             vec = face_vector_from_bgr(
                 st.session_state.proof_img,
                 st.session_state.scale_factor,
@@ -330,7 +305,6 @@ with left:
                 st.error("No face detected in the proof snapshot.")
             else:
                 st.session_state.last_sim = cosine_similarity(st.session_state.ref_vec, vec)
-                # also draw rectangles on proof for the user preview
                 st.session_state.proof_img = draw_faces(
                     st.session_state.proof_img,
                     hex_to_bgr(st.session_state.rect_hex),
