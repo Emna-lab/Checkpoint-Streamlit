@@ -1,308 +1,317 @@
-# bank_face_verify_poc.py
-# ----------------------------------------------------------
-# Face Verification (PoC) — Streamlit + OpenCV (secure snapshot flow)
-# ----------------------------------------------------------
-from __future__ import annotations
+# My_face_verificator_V1.py
+# -----------------------------------------------------------
+# Face Verification (PoC) — Streamlit
+# - Activation/Désactivation (avec libération mémoire)
+# - Capture par caméra OU upload de fichier
+# - Détection visage (Haar), crop du plus grand visage
+# - Descripteur simple (histogramme), Similarité cosinus
+# - Helpers robustes pour éviter les crashs cv2.cvtColor
+# -----------------------------------------------------------
 
+import io
 from pathlib import Path
-from typing import Optional, Tuple
 
 import cv2
 import numpy as np
+from PIL import Image
 import streamlit as st
 
-# ===================== PAGE & STYLE =====================
-st.set_page_config(page_title="BankID • Face Verification (PoC)", page_icon="🏦", layout="wide")
-st.markdown(
+
+# =========================
+# Helpers robustes d'images
+# =========================
+def bgr_from_file(file):
     """
-    <style>
-      .stApp { background: #ffffff; }
-      .app-header { text-align:center; margin-top:.4rem; }
-      .brand { font-size: 1.85rem; font-weight: 800; letter-spacing:.3px; color:#0f172a;}
-      .subtitle { color:#475569; margin-top:.15rem; }
-      .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px 14px; background:#fff; }
-      .section-title { font-weight:700; color:#0f172a; margin-bottom:.5rem; }
-      .badge { display:inline-block; padding:.25rem .6rem; border-radius:999px; font-weight:700; border:1px solid #e5e7eb;}
-      .ok { background:#ecfdf5; color:#065f46; border-color:#a7f3d0;}
-      .ko { background:#fef2f2; color:#991b1b; border-color:#fecaca;}
-      .metric { font-size:1.6rem; font-weight:800; }
-      .muted { color:#64748b; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# ===================== ENTÊTE =====================
-st.markdown(
+    Lit un fichier Streamlit (uploader ou camera_input) et renvoie une image BGR (np.ndarray).
+    Tente cv2.imdecode, sinon fallback via PIL -> RGB -> BGR.
+    Retourne None si échec.
     """
-    <div class="app-header">
-      <div class="brand">BankID • Face Verification (PoC)</div>
-      <div class="subtitle">Secure snapshot-based verification — no continuous streaming</div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-# ===================== HAAR CASCADE =====================
-CASCADE_FILE = "haarcascade_frontalface_default.xml"
-local_path = Path(__file__).parent / CASCADE_FILE
-opencv_path = Path(cv2.data.haarcascades) / CASCADE_FILE
-
-if local_path.exists():
-    CASCADE_PATH = local_path
-elif opencv_path.exists():
-    CASCADE_PATH = opencv_path
-else:
-    st.error(
-        "❌ Haar cascade not found.\n"
-        f"Place {CASCADE_FILE} next to this .py or rely on OpenCV’s default path:\n{opencv_path}"
-    )
-    st.stop()
-
-face_cascade = cv2.CascadeClassifier(str(CASCADE_PATH))
-if face_cascade.empty():
-    st.error("❌ Haar cascade failed to load (file may be corrupted).")
-    st.stop()
-
-# ===================== HELPERS =====================
-def hex_to_bgr(hex_color: str) -> Tuple[int, int, int]:
-    r = int(hex_color[1:3], 16)
-    g = int(hex_color[3:5], 16)
-    b = int(hex_color[5:7], 16)
-    return (b, g, r)
-
-def largest_face_bbox(gray: np.ndarray, scale_factor: float, min_neighbors: int):
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
-    if len(faces) == 0:
-        return None
-    return max(faces, key=lambda b: b[2] * b[3])
-
-def face_vector_from_bgr(
-    bgr: np.ndarray,
-    scale_factor: float,
-    min_neighbors: int,
-    size: int = 128,
-) -> Optional[np.ndarray]:
-    """Return normalized grayscale vector from the largest detected face (None if no face)."""
-    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    bbox = largest_face_bbox(gray, scale_factor, min_neighbors)
-    if bbox is None:
-        return None
-    x, y, w, h = bbox
-    crop = gray[y : y + h, x : x + w]
-    crop = cv2.resize(crop, (size, size), interpolation=cv2.INTER_AREA)
-    vec = crop.astype(np.float32).ravel()
-    norm = np.linalg.norm(vec)
-    if norm < 1e-8:
-        return None
-    return vec / norm
-
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Cosine similarity (a and b must be L2-normalized)."""
-    return float(np.dot(a, b))
-
-def bgr_from_file(file) -> Optional[np.ndarray]:
-    """Read uploaded/camera-input image to BGR np.ndarray."""
     if file is None:
         return None
-    data = file.getvalue() if hasattr(file, "getvalue") else file.read()
-    if data is None:
+
+    # UploadedFile a .getvalue()
+    data = None
+    if hasattr(file, "getvalue"):
+        data = file.getvalue()
+    else:
+        try:
+            data = file.read()
+        except Exception:
+            data = None
+
+    if not data:
         return None
-    buf = np.frombuffer(data, np.uint8)
-    img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-    return img
 
-def draw_faces(bgr: np.ndarray, color_bgr: Tuple[int, int, int], scale_factor: float, min_neighbors: int) -> np.ndarray:
-    out = bgr.copy()
-    gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
-    for (x, y, w, h) in faces:
-        cv2.rectangle(out, (x, y), (x + w, y + h), color_bgr, 2)
-    return out
+    arr = np.frombuffer(data, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # BGR si succès
+    if img is not None:
+        return img
 
-# ===================== STATE =====================
-defaults = {
-    "ref_vec": None,
-    "ref_img": None,
-    "last_result": None,   # dict: similarity, percent, threshold, passed
-    "scale_factor": 1.30,
-    "min_neighbors": 5,
-    "rect_hex": "#2563eb",
-    "threshold": 0.86,
-    "allow_persist": False,   # PoC: off by default (no disk write)
-}
-for k, v in defaults.items():
-    st.session_state.setdefault(k, v)
+    # Fallback PIL (quelques cas de metadata caméra côté cloud)
+    try:
+        pil = Image.open(io.BytesIO(data)).convert("RGB")
+        img_rgb = np.array(pil)              # RGB
+        return cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    except Exception:
+        return None
 
-# ===================== INSTRUCTIONS =====================
+
+def show_bgr_image(bgr: np.ndarray, *, caption: str = "", use_container_width: bool = True):
+    """
+    Affiche une image BGR dans Streamlit sans planter si elle est None ou malformée.
+    """
+    if bgr is None:
+        st.warning("Image non disponible.")
+        return
+    if not isinstance(bgr, np.ndarray):
+        st.warning("Format d’image inattendu (non-numpy).")
+        return
+
+    if bgr.ndim == 2:  # niveaux de gris
+        st.image(bgr, caption=caption, use_container_width=use_container_width)
+    elif bgr.ndim == 3 and bgr.shape[2] == 3:
+        st.image(bgr[:, :, ::-1], caption=caption, use_container_width=use_container_width)  # BGR→RGB
+    else:
+        st.warning("Dimensions d’image non supportées.")
+
+
+# ==================================
+# Détection visage & description (PoC)
+# ==================================
+def get_haar_cascade():
+    """
+    Récupère le classifieur Haar frontal face depuis cv2.data.haarcascades.
+    (pas besoin de fichier local)
+    """
+    xml = str(Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml")
+    cascade = cv2.CascadeClassifier(xml)
+    if cascade.empty():
+        raise RuntimeError("Impossible de charger le Haar cascade.")
+    return cascade
+
+
+def crop_largest_face(bgr, cascade, scaleFactor=1.1, minNeighbors=5):
+    """
+    Détecte les visages, retourne le crop du plus grand visage, ou None si aucun visage.
+    """
+    if bgr is None:
+        return None
+
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    faces = cascade.detectMultiScale(gray, scaleFactor=scaleFactor, minNeighbors=minNeighbors)
+
+    if len(faces) == 0:
+        return None
+
+    # Garder le plus grand visage
+    x, y, w, h = max(faces, key=lambda r: r[2] * r[3])
+    return bgr[y:y + h, x:x + w]
+
+
+def make_descriptor(bgr_face, bins=64):
+    """
+    Crée un descripteur simple à partir d’un visage BGR :
+    - Conversion en HSV
+    - Histogramme H et S concaténés (normalisé)
+    Retourne un vecteur 1D (np.float32) ou None si image invalide.
+    """
+    if bgr_face is None:
+        return None
+
+    hsv = cv2.cvtColor(bgr_face, cv2.COLOR_BGR2HSV)
+    h = cv2.calcHist([hsv], [0], None, [bins], [0, 180])   # H ∈ [0,180]
+    s = cv2.calcHist([hsv], [1], None, [bins], [0, 256])   # S ∈ [0,256]
+    feat = np.concatenate([h.flatten(), s.flatten()]).astype(np.float32)
+    norm = np.linalg.norm(feat) + 1e-8
+    return feat / norm
+
+
+def cosine_similarity(a, b):
+    """
+    Similarité cosinus entre deux vecteurs (a·b / ||a|| ||b||).
+    Retourne un float ∈ [-1, 1]. Ici on s’attend à [0,1] car descripteurs normalisés.
+    """
+    if a is None or b is None:
+        return None
+    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-8
+    return float(np.dot(a, b) / denom)
+
+
+# ========================
+# Init de l'état applicatif
+# ========================
+def init_state():
+    st.session_state.setdefault("active", False)       # app activée/désactivée
+    st.session_state.setdefault("ref_img", None)       # BGR
+    st.session_state.setdefault("ref_vec", None)       # descriptor
+    st.session_state.setdefault("proof_img", None)     # BGR
+    st.session_state.setdefault("proof_vec", None)     # descriptor
+
+
+# =========
+# Interface
+# =========
+st.set_page_config(page_title="Face Verification (PoC)", page_icon="🛡️", layout="wide")
+init_state()
+
 st.markdown(
     """
-<div class="card">
-  <div class="section-title">How it works (snapshot & consent)</div>
-  <ul class="muted">
-    <li>📌 <b>Reference</b>: upload a photo <i>or</i> take a snapshot with your camera.</li>
-    <li>📌 <b>Proof</b>: take a snapshot with your camera for verification.</li>
-    <li>🔒 PoC stores images in memory only (no disk), unless you explicitly enable saving.</li>
-  </ul>
-</div>
+    <h1 style="text-align:center; margin-top:0">🛡️ Face Verification — PoC</h1>
     """,
     unsafe_allow_html=True,
 )
 
-# ===================== SIDEBAR (PARAMS & SECURITY NOTES) =====================
+st.write(
+    "Cette démonstration vérifie si **la personne capturée** correspond à une **référence**. "
+    "Elle utilise un détecteur Haar (crop du plus grand visage) et un descripteur simple (histogrammes HSV) "
+    "puis compare avec une **similarité cosinus**."
+)
+
+# -------------
+# Sidebar: réglages
+# -------------
 with st.sidebar:
-    st.header("Verification parameters")
-    st.session_state.rect_hex = st.color_picker("Rectangle color", st.session_state.rect_hex)
-    st.caption("Purely visual — color of the detection boxes.")
+    st.header("⚙️ Réglages")
 
-    st.session_state.scale_factor = st.slider("scaleFactor", 1.05, 1.60, st.session_state.scale_factor, 0.01)
-    st.caption(">1.0. Larger = faster/rougher scanning; typical 1.1–1.4.")
-
-    st.session_state.min_neighbors = st.slider("minNeighbors", 1, 12, st.session_state.min_neighbors, 1)
-    st.caption("Higher = fewer false positives, needs more stable face.")
-
-    st.session_state.threshold = st.slider("Decision threshold (cosine)", 0.50, 0.98, st.session_state.threshold, 0.01)
-    st.caption("Similarity ≥ threshold ⇒ PASS. Higher threshold = stricter decision.")
+    # Activation / Désactivation (revient à libérer l'état)
+    col_on, col_off = st.columns(2)
+    with col_on:
+        if st.button("✅ Activer", use_container_width=True):
+            st.session_state.active = True
+            st.toast("Module activé", icon="✅")
+    with col_off:
+        if st.button("🛑 Désactiver", use_container_width=True):
+            # remise à zéro "soft"
+            st.session_state.active = False
+            st.session_state.ref_img = None
+            st.session_state.ref_vec = None
+            st.session_state.proof_img = None
+            st.session_state.proof_vec = None
+            st.toast("Module désactivé", icon="🛑")
 
     st.divider()
-    st.header("Security (PoC)")
-    st.session_state.allow_persist = st.checkbox("Allow saving images to disk (snapshots/)", value=False)
-    st.caption("If disabled (default), images stay in memory and are discarded on refresh.")
+    st.caption("Détection visage (Haar)")
+    scaleFactor = st.slider("scaleFactor", 1.05, 1.5, 1.15, 0.01)
+    minNeighbors = st.slider("minNeighbors", 3, 12, 5, 1)
 
-# ===================== LAYOUT =====================
-left, right = st.columns([6, 6])
+    st.divider()
+    st.caption("Descripteur")
+    bins = st.slider("Histogram bins (H & S)", 16, 128, 64, 8)
 
-# ---- RIGHT: RESULT (persistent) ----
-with right:
-    st.markdown('<div class="section-title">Verification result</div>', unsafe_allow_html=True)
-    res = st.session_state.last_result
-    if res is None:
-        st.caption("Capture a reference and a proof, then click **Verify**.")
+    st.divider()
+    st.caption("Décision")
+    threshold = st.slider("Seuil d'acceptation (%)", 50, 95, 80, 1)
+
+    st.divider()
+    # Clear reference
+    if st.button("🧹 Clear reference", use_container_width=True):
+        st.session_state.ref_img = None
+        st.session_state.ref_vec = None
+        st.toast("Référence supprimée.", icon="🧹")
+
+# Stop net si désactivée
+if not st.session_state.active:
+    st.info("Le module est **désactivé**. Cliquez sur **Activer** dans la sidebar.")
+    st.stop()
+
+# Cascade prêt
+try:
+    CASCADE = get_haar_cascade()
+except Exception as e:
+    st.error(f"Erreur cascade Haar : {e}")
+    st.stop()
+
+# =========================
+# Zone Référence et Preuve
+# =========================
+c_ref, c_proof = st.columns(2, gap="large")
+
+# ----- Référence -----
+with c_ref:
+    st.subheader("🧾 Référence (photo connue)")
+    st.write("Charge une image ou prends une photo de la **personne de référence**.")
+
+    ref_upl = st.file_uploader("Upload image (référence)", type=["png", "jpg", "jpeg"], key="ref_upl")
+    ref_cam = st.camera_input("Ou capture caméra (référence)", key="ref_cam")
+
+    new_ref = ref_cam if ref_cam is not None else ref_upl
+    if new_ref is not None:
+        img_bgr = bgr_from_file(new_ref)
+        face = crop_largest_face(img_bgr, CASCADE, scaleFactor=scaleFactor, minNeighbors=minNeighbors)
+        if face is None:
+            st.warning("Aucun visage détecté dans la référence.")
+        else:
+            st.session_state.ref_img = face
+            st.session_state.ref_vec = make_descriptor(face, bins=bins)
+
+    show_bgr_image(st.session_state.ref_img, caption="Référence (visage recadré)")
+
+# ----- Preuve -----
+with c_proof:
+    st.subheader("🧑‍💻 Preuve (vérification)")
+    st.write("Charge une image ou prends une photo à **vérifier**.")
+
+    proof_upl = st.file_uploader("Upload image (preuve)", type=["png", "jpg", "jpeg"], key="proof_upl")
+    proof_cam = st.camera_input("Ou capture caméra (preuve)", key="proof_cam")
+
+    new_proof = proof_cam if proof_cam is not None else proof_upl
+    if new_proof is not None:
+        img_bgr = bgr_from_file(new_proof)
+        face = crop_largest_face(img_bgr, CASCADE, scaleFactor=scaleFactor, minNeighbors=minNeighbors)
+        if face is None:
+            st.warning("Aucun visage détecté dans la preuve.")
+        else:
+            st.session_state.proof_img = face
+            st.session_state.proof_vec = make_descriptor(face, bins=bins)
+
+    show_bgr_image(st.session_state.proof_img, caption="Preuve (visage recadré)")
+
+st.divider()
+
+# ===========
+# Vérification
+# ===========
+left, mid, right = st.columns([1, 1, 2])
+with mid:
+    verify_clicked = st.button("🔐 Vérifier l'identité", use_container_width=True)
+
+if verify_clicked:
+    ref_vec = st.session_state.ref_vec
+    proof_vec = st.session_state.proof_vec
+
+    if ref_vec is None:
+        st.error("Référence absente ou invalide.")
+    elif proof_vec is None:
+        st.error("Preuve absente ou invalide.")
     else:
-        sim = res["similarity"]
-        percent = res["percent"]
-        threshold = res["threshold"]
-        passed = res["passed"]
+        sim = cosine_similarity(ref_vec, proof_vec)  # [0..1]
+        percent = max(0.0, min(1.0, sim)) * 100.0
+        st.metric("Similarité cosinus", f"{percent:.1f} %")
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown("**Similarity**")
-            st.markdown(f"<div class='metric'>{sim:.3f}</div>", unsafe_allow_html=True)
-        with c2:
-            st.markdown("**Match (%)**")
-            st.markdown(f"<div class='metric'>{percent:.1f}%</div>", unsafe_allow_html=True)
-        with c3:
-            st.markdown("**Threshold**")
-            st.markdown(f"<div class='metric'>{threshold:.2f}</div>", unsafe_allow_html=True)
-
-        st.markdown("**Decision**")
-        if passed:
-            st.markdown("<span class='badge ok'>✅ PASS</span>", unsafe_allow_html=True)
+        if percent >= threshold:
+            st.success(f"✅ Identité validée (≥ {threshold}%).")
         else:
-            st.markdown("<span class='badge ko'>❌ FAIL</span>", unsafe_allow_html=True)
+            st.error(f"❌ Identité rejetée (< {threshold}%).")
 
-        st.caption("Cosine similarity on 128×128 grayscale face crops. % is clipped to [0–100].")
+# ===========================
+# Notes pédagogiques (footer)
+# ===========================
+with st.expander("ℹ️ Explications (cliquer pour ouvrir)"):
+    st.markdown(
+        """
+        **Pipeline pédagogique :**
+        1. **Détection de visage** : Haar cascade (OpenCV) → on garde le **plus grand visage** de l'image.
+        2. **Descripteur** : on convertit le visage en **HSV** puis on calcule deux histogrammes (**H** et **S**) que l’on **concatène et normalise**.
+        3. **Similarité** : on calcule la **similarité cosinus** entre la référence et la preuve :
+           \n
+           \t\\( \\text{cos}(\\theta) = \\frac{\\mathbf{a}\\cdot\\mathbf{b}}{\\lVert\\mathbf{a}\\rVert\\,\\lVert\\mathbf{b}\\rVert} \\)
+           \n
+           Ici, plus la valeur est proche de **1** (donc 100%), plus les vecteurs sont “proches”.
+        4. **Décision** : si la similarité ≥ **seuil** (réglable), on valide, sinon on rejette.
 
-# ---- LEFT: Reference & Proof capture ----
-with left:
-    st.markdown('<div class="section-title">1) Reference capture</div>', unsafe_allow_html=True)
-    col_ref = st.columns([1, 1])
-
-    # Upload reference
-    with col_ref[0]:
-        ref_upload = st.file_uploader("Upload reference photo", type=["jpg", "jpeg", "png"])
-        if ref_upload is not None:
-            img_bgr = bgr_from_file(ref_upload)
-            vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
-            if vec is None:
-                st.error("No face found in the uploaded image.")
-            else:
-                st.session_state.ref_vec = vec
-                st.session_state.ref_img = draw_faces(
-                    img_bgr, hex_to_bgr(st.session_state.rect_hex),
-                    st.session_state.scale_factor, st.session_state.min_neighbors
-                )
-                st.success("Reference saved (from upload).")
-
-    # Camera reference
-    with col_ref[1]:
-        ref_cam = st.camera_input("Or take a reference snapshot")
-        if ref_cam is not None:
-            img_bgr = bgr_from_file(ref_cam)
-            vec = face_vector_from_bgr(img_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
-            if vec is None:
-                st.error("No face detected in the reference snapshot.")
-            else:
-                st.session_state.ref_vec = vec
-                st.session_state.ref_img = draw_faces(
-                    img_bgr, hex_to_bgr(st.session_state.rect_hex),
-                    st.session_state.scale_factor, st.session_state.min_neighbors
-                )
-                st.success("Reference saved (from camera).")
-
-    # Reference preview + clear
-    if st.session_state.ref_img is not None:
-        st.image(cv2.cvtColor(st.session_state.ref_img, cv2.COLOR_BGR2RGB),
-                 caption="Reference", use_container_width=True)
-        if st.button("🧹 Clear reference"):
-            st.session_state.ref_vec = None
-            st.session_state.ref_img = None
-            st.session_state.last_result = None
-            st.success("Reference cleared.")
-
-    st.markdown('---')
-    st.markdown('<div class="section-title">2) Proof snapshot</div>', unsafe_allow_html=True)
-    proof_cam = st.camera_input("Take a proof snapshot for verification")
-
-    st.markdown('---')
-    st.markdown('<div class="section-title">3) Verify</div>', unsafe_allow_html=True)
-    if st.button("✅ Verify identity"):
-        if st.session_state.ref_vec is None:
-            st.warning("Please set a reference first (upload or camera).")
-        elif proof_cam is None:
-            st.warning("Please take a proof snapshot.")
-        else:
-            proof_bgr = bgr_from_file(proof_cam)
-            curr_vec = face_vector_from_bgr(proof_bgr, st.session_state.scale_factor, st.session_state.min_neighbors)
-            if curr_vec is None:
-                st.error("No face detected in the proof snapshot.")
-            else:
-                sim = cosine_similarity(st.session_state.ref_vec, curr_vec)
-                sim_clip = float(np.clip(sim, 0.0, 1.0))
-                percent = sim_clip * 100.0
-                passed = sim >= st.session_state.threshold
-
-                st.session_state.last_result = {
-                    "similarity": sim,
-                    "percent": percent,
-                    "threshold": st.session_state.threshold,
-                    "passed": passed,
-                }
-                st.success("Verification computed. See the result panel on the right.")
-
-    # Optional disk save (explicit consent)
-    if st.session_state.allow_persist:
-        if st.session_state.ref_img is not None:
-            ok, buf = cv2.imencode(".png", st.session_state.ref_img)
-            st.download_button("⬇️ Download reference (PNG)", data=buf.tobytes(),
-                               file_name="reference.png", mime="image/png")
-        if proof_cam is not None:
-            proof_bgr = bgr_from_file(proof_cam)
-            ok, buf = cv2.imencode(".png", proof_bgr)
-            st.download_button("⬇️ Download proof (PNG)", data=buf.tobytes(),
-                               file_name="proof.png", mime="image/png")
-
-# ===================== NOTES =====================
-st.markdown(
-    """
-<div class="card">
-  <div class="section-title">Security & PoC scope</div>
-  <ul class="muted">
-    <li>No continuous streaming — browser prompts for camera permission per snapshot.</li>
-    <li>No disk write by default (toggle in sidebar if you need downloads).</li>
-    <li>For production KYC/IDV: use robust face embeddings (e.g., InsightFace) and liveness detection.</li>
-  </ul>
-</div>
-    """,
-    unsafe_allow_html=True,
-)
+        **Réglages utiles (sidebar) :**
+        - `scaleFactor` / `minNeighbors` : stabilité et sensibilité de la détection Haar.
+        - `Histogram bins` : granularité du descripteur (plus grand = plus fin mais plus bruité).
+        - `Seuil d'acceptation` : niveau d’exigence (en %).
+        """
+    )
