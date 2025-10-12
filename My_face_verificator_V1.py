@@ -2,14 +2,13 @@
 # ----------------------------------------------------------
 # Face Verification (PoC) — Streamlit + OpenCV
 # - Référence : upload OU snapshot (Start/Stop)
-# - Proof : live preview (desktop) avec boîtes + snapshot cloud-friendly
+# - Proof : live preview (desktop) non bloquant (mono-frame + auto-refresh) + snapshot cloud
 # - Boutons Clear (référence / proof)
-# - Sidebar pédagogique
+# - Sidebar pédagogique + résultats synchrones
 # ----------------------------------------------------------
 
 from pathlib import Path
 from typing import Optional, Tuple
-import time
 
 import cv2
 import numpy as np
@@ -70,14 +69,13 @@ if face_cascade.empty():
 
 # ===================== HELPERS =====================
 def hex_to_bgr(hex_color: str) -> Tuple[int, int, int]:
-    """Convertit une couleur HEX ('#RRGGBB') en tuple BGR pour OpenCV."""
+    """Convert '#RRGGBB' to OpenCV BGR tuple."""
     r = int(hex_color[1:3], 16)
     g = int(hex_color[3:5], 16)
     b = int(hex_color[5:7], 16)
     return (b, g, r)
 
 def largest_face_bbox(gray: np.ndarray, scale_factor: float, min_neighbors: int):
-    """Retourne la plus grande boîte de visage détectée (ou None)."""
     faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
     if len(faces) == 0:
         return None
@@ -89,7 +87,7 @@ def face_vector_from_bgr(
     min_neighbors: int,
     size: int = 128,
 ) -> Optional[np.ndarray]:
-    """Extrait un vecteur visage (grayscale 128x128 aplati, L2-normalisé) pour le plus grand visage."""
+    """Return normalized grayscale vector from the largest detected face (None if no face)."""
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     bbox = largest_face_bbox(gray, scale_factor, min_neighbors)
     if bbox is None:
@@ -104,11 +102,11 @@ def face_vector_from_bgr(
     return vec / norm
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Cosine similarity. Avec des vecteurs L2-normalisés, c'est un simple produit scalaire."""
+    """Cosine similarity. With L2-normalized vectors, it's just a dot product."""
     return float(np.dot(a, b))
 
 def bgr_from_file(file) -> Optional[np.ndarray]:
-    """Lit un upload (ou camera_input) en image BGR (np.ndarray)."""
+    """Read uploaded/camera_input image to BGR np.ndarray."""
     if file is None:
         return None
     data = file.getvalue() if hasattr(file, "getvalue") else file.read()
@@ -120,7 +118,7 @@ def bgr_from_file(file) -> Optional[np.ndarray]:
 
 def draw_faces(bgr: np.ndarray, color_bgr: Tuple[int, int, int],
                scale_factor: float, min_neighbors: int) -> np.ndarray:
-    """Dessine des rectangles sur toutes les faces détectées."""
+    """Draw rectangles on all detected faces."""
     out = bgr.copy()
     gray = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(gray, scaleFactor=scale_factor, minNeighbors=min_neighbors)
@@ -129,7 +127,7 @@ def draw_faces(bgr: np.ndarray, color_bgr: Tuple[int, int, int],
     return out
 
 def show_bgr_image(bgr: Optional[np.ndarray], caption: str):
-    """Affiche un BGR → RGB. Fallback pour anciennes versions de Streamlit."""
+    """Display BGR → RGB with fallback for older Streamlit."""
     if bgr is None:
         return
     img_rgb = bgr[:, :, ::-1]
@@ -138,67 +136,26 @@ def show_bgr_image(bgr: Optional[np.ndarray], caption: str):
     except TypeError:
         st.image(img_rgb, caption=caption, use_column_width=True)
 
-# ========== LIVE PREVIEW (DESKTOP) POUR LA PROOF ==========
-def live_proof_preview(color_bgr: Tuple[int, int, int], scale: float, neigh: int):
-    """
-    Aperçu vidéo local (OpenCV) avec boîtes pour la proof.
-    - Desktop (PyCharm) uniquement : accès webcam côté serveur impossible sur le cloud.
-    - Le bouton Stop est géré DANS la boucle : on vérifie à chaque frame.
-    """
-    ph = st.empty()  # conteneur pour l'image
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        st.warning("Live preview is available on desktop only (cannot access webcam on the cloud).")
-        return
-
-    # bouton stop visible tant que le flux est actif
-    stop_btn = st.button("⏹ Stop preview")
-
-    while st.session_state.get("proof_preview_on", False):
-        ok, frame = cap.read()
-        if not ok:
-            break
-
-        # Dessine les boîtes sur la frame affichée
-        frame_out = draw_faces(frame, color_bgr, scale, neigh)
-        # Mémorise la frame brute pour la capture
-        st.session_state["_last_preview_frame"] = frame.copy()
-
-        # Affiche (BGR->RGB) avec fallback
-        img_rgb = frame_out[:, :, ::-1]
-        try:
-            ph.image(img_rgb, caption="Live proof preview (desktop)", use_container_width=True)
-        except TypeError:
-            ph.image(img_rgb, caption="Live proof preview (desktop)", use_column_width=True)
-
-        # Si l'utilisateur a cliqué sur Stop
-        if stop_btn:
-            st.session_state.proof_preview_on = False
-            break
-
-        time.sleep(0.03)
-
-    cap.release()
-    ph.empty()
-
 # ===================== STATE (defaults) =====================
 defaults = {
-    "ref_img": None,      # BGR avec rectangles
-    "proof_img": None,    # BGR (dernière preuve)
-    "ref_vec": None,      # vecteur visage (référence)
-    "last_sim": None,     # dernière similarité
+    # Images & vectors
+    "ref_img": None,      # BGR with rectangles (reference)
+    "proof_img": None,    # BGR (current proof)
+    "ref_vec": None,      # reference face vector
+    "last_sim": None,     # last similarity
 
-    "ref_cam_on": False,
+    # Cameras
+    "ref_cam_on": False,          # reference camera mode
+    "proof_preview_on": False,    # proof live preview flag (non-blocking)
 
+    # Detection params
     "scale_factor": 1.30,
     "min_neighbors": 5,
     "rect_hex": "#2563eb",
     "threshold": 0.86,
 
+    # Consent for saving
     "allow_persist": False,
-
-    "proof_preview_on": False,   # état de l’aperçu live
-    "_last_preview_frame": None  # dernière frame brute vue en live
 }
 for k, v in defaults.items():
     st.session_state.setdefault(k, v)
@@ -329,28 +286,44 @@ with left:
     # ===== 2) PROOF =====
     st.markdown('<div class="section-title">2) Proof (with live preview on desktop)</div>', unsafe_allow_html=True)
 
-    # --- Aperçu live local (desktop) ---
-    col_live = st.columns(3)
+    # --- Live preview (non-bloquant) : 1 frame / rerun + auto-refresh ---
+    # On utilise st_autorefresh pour re-rendre périodiquement l'écran tant que le mode est ON.
+    from streamlit_autorefresh import st_autorefresh  # petite lib utile pour l’auto-refresh
+
+    live_cols = st.columns(3)
     if not st.session_state.proof_preview_on:
-        if col_live[0].button("▶️ Start live preview (desktop)"):
+        if live_cols[0].button("▶️ Start live preview (desktop)"):
             st.session_state.proof_preview_on = True
-            st.session_state["_last_preview_frame"] = None
             st.rerun()
     else:
-        # Lance l’aperçu : le bouton Stop est géré dans la boucle
-        live_proof_preview(
-            color_bgr=hex_to_bgr(st.session_state.rect_hex),
-            scale=st.session_state.scale_factor,
-            neigh=st.session_state.min_neighbors,
-        )
-        # Capture la frame courante
-        if col_live[1].button("📸 Capture current frame"):
-            frame = st.session_state.get("_last_preview_frame", None)
+        # auto-refresh ~12 fps (≈ 80 ms)
+        st_autorefresh(interval=80, key="proof_refresh")
+
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            st.warning("Live preview is available on desktop only (cannot access webcam on the cloud).")
+            st.session_state.proof_preview_on = False
+        else:
+            ok, frame = cap.read()
+            cap.release()
+            if ok:
+                frame_out = draw_faces(frame, hex_to_bgr(st.session_state.rect_hex),
+                                       st.session_state.scale_factor, st.session_state.min_neighbors)
+                show_bgr_image(frame_out, caption="Live proof preview (desktop)")
+                # mémorise la dernière frame brute pour capture
+                st.session_state["_last_preview_frame"] = frame.copy()
+
+        # Contrôles
+        if live_cols[1].button("📸 Capture current frame"):
+            frame = st.session_state.get("_last_preview_frame")
             if frame is None:
                 st.warning("No frame available yet, please wait a moment.")
             else:
                 st.session_state.proof_img = frame.copy()
                 st.success("Proof snapshot captured from live preview.")
+        if live_cols[2].button("⏹ Stop preview"):
+            st.session_state.proof_preview_on = False
+            st.rerun()
 
     # --- Alternative Cloud : snapshot simple ---
     st.caption("If live preview is unavailable, use the snapshot below:")
@@ -360,7 +333,7 @@ with left:
         st.session_state.proof_img = img_bgr
         st.success("Proof snapshot captured.")
 
-    # Affichage + bouton Clear proof
+    # Affichage + bouton Clear proof (pour retirer la photo brute)
     show_bgr_image(st.session_state.proof_img, caption="Proof (current)")
     if st.session_state.proof_img is not None:
         if st.button("🧹 Clear proof"):
