@@ -1,4 +1,4 @@
-# bank_face_verify_poc_nestingfix.py
+# bank_face_verify_poc_nestingfix_v2.py
 # ----------------------------------------------------------
 # Face Verification (PoC) — Streamlit + OpenCV (snapshots)
 # ----------------------------------------------------------
@@ -27,7 +27,6 @@ st.markdown(
       .ko { background:#fef2f2; color:#991b1b; border-color:#fecaca;}
       .metric { font-size:1.6rem; font-weight:800; }
       .muted { color:#64748b; }
-      .btn-row > div { display:inline-block; margin-right:.5rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -119,10 +118,16 @@ def draw_faces(bgr: np.ndarray, color_bgr: Tuple[int, int, int],
         cv2.rectangle(out, (x, y), (x + w, y + h), color_bgr, 2)
     return out
 
-def show_bgr_image(bgr: Optional[np.ndarray], caption: str, use_container_width: bool = True):
+def show_bgr_image(bgr: Optional[np.ndarray], caption: str):
+    """Affiche un BGR → RGB. Compatible toutes versions de Streamlit:
+       essaye use_container_width puis fallback use_column_width."""
     if bgr is None:
         return
-    st.image(bgr[:, :, ::-1], caption=caption, use_container_width=use_container_width)  # BGR→RGB
+    img_rgb = bgr[:, :, ::-1]
+    try:
+        st.image(img_rgb, caption=caption, use_container_width=True)
+    except TypeError:
+        st.image(img_rgb, caption=caption, use_column_width=True)
 
 # ===================== STATE (defaults) =====================
 defaults = {
@@ -218,7 +223,7 @@ with left:
     # ===== 1) REFERENCE =====
     st.markdown('<div class="section-title">1) Reference capture</div>', unsafe_allow_html=True)
 
-    # Upload (pas de colonnes imbriquées)
+    # Upload
     ref_upload = st.file_uploader("Upload reference photo", type=["jpg", "jpeg", "png"])
     if ref_upload is not None:
         img_bgr = bgr_from_file(ref_upload)
