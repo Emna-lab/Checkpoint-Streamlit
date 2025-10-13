@@ -25,4 +25,11 @@ opencv-python-headless==4.8.1.78
 Pillow==10.3.0
 
 
+sounddevice==0.4.6
+soundfile==0.12.1
+SpeechRecognition==3.14.3
+requests>=2.31.0
+
+
+PyAudio==0.2.14
 
