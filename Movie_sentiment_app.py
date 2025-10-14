@@ -1,403 +1,400 @@
-# imdb_sentiment_app.py
-# -----------------------------------------------------------------------------
-# 🎯 Objective (EN): Train a neural network to classify IMDb reviews (pos/neg)
-# 💡 This Streamlit app follows the requested, step-by-step educational flow.
-# -----------------------------------------------------------------------------
-
-import io
+# ================================ IMPORTS =====================================
+# We keep imports explicit and beginner-friendly: each one has a clear role.
+import os
 import re
-import unicodedata
+import io
+import html
 import string
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+
 import streamlit as st
-import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
-from typing import Tuple
 
-# Reproducibility
-import random
-random.seed(42)
-np.random.seed(42)
-
-# NLTK for text preprocessing
+# Text processing
 import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 
-# Scikit-learn utilities
+# Visualization
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# ML & feature engineering
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import confusion_matrix, classification_report, precision_recall_fscore_support
+from sklearn.metrics import (
+    confusion_matrix, classification_report, accuracy_score, precision_recall_fscore_support
+)
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 # TensorFlow / Keras
-#import tensorflow as tf
-#from tensorflow import keras
-#from tensorflow.keras import layers
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
 
-try:
-    import tensorflow as tf
-    from tensorflow import keras
-    from tensorflow.keras import layers
-except Exception as e:
-    import streamlit as st
-    st.error(
-        "TensorFlow n'est pas disponible dans l'environnement. "
-        "Vérifie `runtime.txt` (=3.10) et `requirements.txt` (tensorflow-cpu==2.12.0)."
-    )
-    st.stop()
 
-import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # moins de logs verbeux de TF
+# ==================== MAKE NLTK DOWNLOADS ROBUST ON STREAMLIT =================
+# On Streamlit Cloud, the ~/nltk_data folder may already exist.
+# We create it if needed and add it to nltk.data.path to avoid FileExistsError.
+NLTK_DIR = Path.home() / "nltk_data"
+NLTK_DIR.mkdir(parents=True, exist_ok=True)
+nltk.data.path.append(str(NLTK_DIR))
 
-# ============================== NLTK safety download ==========================
 def safe_nltk_download(resource, name):
+    """Try to find an NLTK resource; download it quietly if missing."""
     try:
         nltk.data.find(resource)
     except LookupError:
-        nltk.download(name)
+        nltk.download(name, download_dir=str(NLTK_DIR), quiet=True)
 
 safe_nltk_download('tokenizers/punkt', 'punkt')
 safe_nltk_download('corpora/stopwords', 'stopwords')
 
 EN_STOP = set(stopwords.words('english'))
 
-# ============================== Streamlit Page Setup ==========================
-st.set_page_config(page_title="IMDb Sentiment (DL, TF-IDF)", page_icon="🎬", layout="wide")
-st.title("🎬 IMDb Sentiment Classification — Neural Network (TF-IDF)")
 
-st.markdown("""
-This playful lab trains a **simple neural network** to classify movie reviews from IMDb
-as **positive** or **negative**.
+# ============================= STREAMLIT HEADER ================================
+st.set_page_config(page_title="IMDb Sentiment — Simple NN (TF-IDF + Keras)",
+                   page_icon="🎬", layout="wide")
+st.title("🎬 IMDb Movie Review Sentiment — Simple Neural Network (TF-IDF + Keras)")
+st.write("""
+**Goal (for beginners):** Train a small neural network to classify IMDb reviews as **positive** or **negative**.  
+This app is deliberately simple and pedagogical, with very explicit comments and visuals.
 """)
 
-# ============================== Sidebar Controls =============================
-st.sidebar.header("⚙️ Training controls")
+st.info("➡️ Place a file named **`IMDB Dataset.csv`** at the app root **or** in a `data/` folder. "
+        "It must contain two columns: `review` (text) and `sentiment` (`positive`/`negative`).")
 
-# 1) Epochs: now allowed up to 100 (requested change)
-epochs = st.sidebar.slider("Epochs (max 100)", min_value=1, max_value=100, value=10, step=1)
 
-# 2) EarlyStopping controls (requested change)
-use_es = st.sidebar.checkbox("Enable EarlyStopping (monitor = val_loss)", value=True)
-es_patience = st.sidebar.slider("EarlyStopping patience (epochs without improvement)", 1, 20, 3)
-es_min_delta = st.sidebar.number_input("EarlyStopping min_delta (loss improvement threshold)", min_value=0.0, value=0.0, step=0.001)
+# ============================ HELPER: READ CSV SAFE ============================
+@st.cache_data(show_spinner=False)
+def read_imdb_csv(csv_path: Path) -> pd.DataFrame:
+    """
+    Robust CSV reader:
+      - Autodetects a plausible separator among [',', ';', '\\t', '|'].
+      - Normalizes column names to lower-case and strips spaces.
+      - Maps 'review' and 'sentiment' columns even if small naming variations exist.
 
-batch_size = st.sidebar.selectbox("Batch size", [16, 32, 64, 128], index=1)
-val_split = st.sidebar.slider("Validation split", 0.1, 0.3, 0.2, 0.05)
-hidden_units = st.sidebar.slider("Hidden units", 64, 512, 128, 32)
-hidden_dropout = st.sidebar.slider("Hidden dropout", 0.0, 0.6, 0.2, 0.05)
-learning_rate = st.sidebar.selectbox("Learning rate", [1e-4, 3e-4, 1e-3, 3e-3], index=2)
+    Raises a clear error if format is not compatible.
+    """
+    if not csv_path.exists():
+        raise FileNotFoundError(f"File not found: {csv_path}")
 
-st.sidebar.caption("""
-**Tip:** EarlyStopping stops training when `val_loss` stops improving by at least `min_delta`
-for `patience` epochs, and restores the best weights.
-""")
+    # Peek first kilobytes to guess delimiter in a simple way
+    sample = csv_path.read_text(encoding="utf-8", errors="ignore")[:5000]
+    seps = [',', ';', '\t', '|']
+    sep_counts = {s: sample.count(s) for s in seps}
+    sep = max(sep_counts, key=sep_counts.get) if sep_counts else ','
 
-# ============================== Helpers (preprocess) ==========================
-def normalize_text(s: str) -> str:
-    """Lowercase, strip accents, remove HTML/URLs, tokenize and remove stopwords & punctuation."""
-    if not isinstance(s, str):
-        return ""
-    s = s.lower().strip()
+    try:
+        df = pd.read_csv(csv_path, sep=sep, encoding="utf-8", on_bad_lines="skip")
+    except Exception as e:
+        raise ValueError(f"❌ Failed to read '{csv_path.name}'. Details: {e}")
 
-    # Remove HTML tags
-    s = re.sub(r"<[^>]+>", " ", s)
-    # Remove URLs
-    s = re.sub(r"http\S+|www\.\S+", " ", s)
+    if df.empty or df.shape[1] < 2:
+        raise ValueError("❌ Empty or invalid file: not enough columns to parse.")
 
-    # Normalize unicode (strip accents)
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(ch for ch in s if not unicodedata.category(ch).startswith("M"))
+    # Normalize columns
+    df.columns = [c.strip().lower() for c in df.columns]
 
-    # Tokenize
+    # Map columns flexibly
+    col_map = {}
+    for c in df.columns:
+        if 'review' in c:
+            col_map[c] = 'review'
+        elif 'sentiment' in c or 'label' in c or 'target' in c:
+            col_map[c] = 'sentiment'
+
+    df = df.rename(columns=col_map)
+
+    if 'review' not in df.columns or 'sentiment' not in df.columns:
+        raise ValueError("❌ CSV must have columns named (or mappable to) 'review' and 'sentiment'.")
+
+    # Keep only what we need
+    df = df[['review', 'sentiment']].dropna()
+
+    # Normalize sentiment values to {0,1}
+    df['sentiment'] = df['sentiment'].astype(str).str.lower().str.strip()
+    mapping = {'positive': 1, 'pos': 1, '1': 1, 'negative': 0, 'neg': 0, '0': 0}
+    if not set(df['sentiment']).issubset(set(mapping.keys())):
+        raise ValueError("❌ Sentiment values must be 'positive'/'negative' (or equivalents like pos/neg/1/0).")
+    df['sentiment'] = df['sentiment'].map(mapping).astype(int)
+
+    # Small sanity cleanup
+    df['review'] = df['review'].astype(str)
+    df = df[df['review'].str.strip().ne('')]
+
+    return df.reset_index(drop=True)
+
+
+# ========================== TEXT PREPROCESSING PIPELINE ========================
+def clean_text(s: str) -> str:
+    """
+    Very simple and explainable cleaning:
+      1) HTML entity unescape (e.g., &amp; -> &)
+      2) Lowercase the text
+      3) Remove HTML tags
+      4) Remove URLs
+      5) Remove extra spaces
+    """
+    s = html.unescape(s)
+    s = s.lower()
+    s = re.sub(r"<[^>]+>", " ", s)                          # remove HTML tags
+    s = re.sub(r"http\S+|www\.\S+", " ", s)                 # remove URLs
+    s = re.sub(r"[^a-z0-9' ]+", " ", s)                     # keep letters/digits/space/simple apostrophes
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def tokenize_and_remove_stopwords(s: str):
+    """
+    Tokenize with NLTK and remove English stop words.
+    We keep it readable and easy to follow.
+    """
     tokens = word_tokenize(s)
-
-    # Remove stopwords & punctuation & keep simple alpha tokens
-    tokens = [t for t in tokens
-              if t not in EN_STOP and t not in string.punctuation and any(c.isalpha() for c in t)]
-
+    tokens = [t for t in tokens if t not in EN_STOP and t not in string.punctuation]
     return " ".join(tokens)
 
-# ============================== 1) Data Loading & Exploration =================
-st.header("1) Data Loading and Exploration")
 
-# --- Drop-in replacement for your current CSV load ---
-from pathlib import Path
-import pandas as pd
-import csv
-import streamlit as st
-
-from pathlib import Path
-import pandas as pd
-import csv
-import streamlit as st
-
-def find_imdb_csv() -> Path | None:
-    here = Path(__file__).parent
-    candidates = [
-        here / "IMDB Dataset.csv",
-        here / "data" / "IMDB Dataset.csv",
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-    # Dernière chance: prendre le premier CSV qui contient "IMDB" dans le nom
-    for p in here.glob("*.csv"):
-        if "imdb" in p.name.lower():
-            return p
-    for p in (here / "data").glob("*.csv") if (here / "data").exists() else []:
-        if "imdb" in p.name.lower():
-            return p
-    return None
-
-def read_imdb_csv(csv_path: Path) -> pd.DataFrame:
-    # Petit aperçu pour debug
-    size = csv_path.stat().st_size
-    st.caption(f"📄 Using `{csv_path.name}` • size: {size:,} bytes")
-    with csv_path.open("rb") as f:
-        head = f.read(300)
-    st.code(head.decode("utf-8", errors="replace"), language="text")
-
-    # Détection du séparateur la plus simple possible
-    with csv_path.open("r", encoding="utf-8", errors="replace", newline="") as f:
-        sample = f.read(10_000)
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=[",",";","\t","|"])
-        sep = dialect.delimiter
-    except Exception:
-        # Heuristique minimale
-        sep_counts = {",": sample.count(","), ";": sample.count(";"), "\t": sample.count("\t")}
-        sep = max(sep_counts, key=sep_counts.get)
-
-    # Lecture
-    df = pd.read_csv(csv_path, sep=sep, encoding="utf-8", on_bad_lines="skip")
-    # Normalisation douce des colonnes
-    df.columns = [c.strip().lower() for c in df.columns]
-    # Tentative de mapping si noms un peu différents
-    col_map = {}
-    if "review" not in df.columns:
-        # cherche une colonne qui ressemble à review
-        for c in df.columns:
-            if "review" in c or "text" in c or "comment" in c:
-                col_map[c] = "review"
-                break
-    if "sentiment" not in df.columns:
-        for c in df.columns:
-            if "sentiment" in c or "label" in c or "target" in c:
-                col_map[c] = "sentiment"
-                break
-    if col_map:
-        df = df.rename(columns=col_map)
-
-    # Validation finale
-    missing = {"review", "sentiment"} - set(df.columns)
-    if missing:
-        st.error(f"❌ Columns missing: {missing}. Expected exactly: 'review' and 'sentiment'.")
-        st.stop()
-
-    # Messages utiles
-    st.success(f"Loaded {len(df):,} rows with columns {list(df.columns)}.")
-    if len(df) < 50_000:
-        st.info("ℹ️ You’re using a subset (e.g., 10k rows). That’s fine for a PoC and will train faster.")
-
-    # Nettoyage basique (enlève lignes vides)
-    df = df.dropna(subset=["review", "sentiment"]).reset_index(drop=True)
+@st.cache_data(show_spinner=False)
+def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply the full preprocessing pipeline to the DataFrame (review column).
+    Returns a *new* DataFrame with a 'review_clean' column.
+    """
+    df = df.copy()
+    df['review_clean'] = df['review'].apply(clean_text).apply(tokenize_and_remove_stopwords)
     return df
 
-# === Utilisation ===
-csv_path = find_imdb_csv()
-if not csv_path:
-    st.error("Place `IMDB Dataset.csv` at the app root or in `data/`, then redeploy.")
+
+# =============================== LOAD THE DATA =================================
+# We accept two possible locations: ./IMDB Dataset.csv or ./data/IMDB Dataset.csv
+root_csv = Path(__file__).parent / "IMDB Dataset.csv"
+data_csv = Path(__file__).parent / "data" / "IMDB Dataset.csv"
+
+csv_path = root_csv if root_csv.exists() else data_csv
+
+if not csv_path.exists():
+    st.error("❌ Could not find `IMDB Dataset.csv` at the app root or in a `data/` folder.")
     st.stop()
 
-df = read_imdb_csv(csv_path)
-st.success(f"Loaded {len(df):,} rows.")
-st.dataframe(df.head())
+try:
+    df = read_imdb_csv(csv_path)
+except Exception as e:
+    st.error(str(e))
+    st.stop()
 
+st.success(f"✅ Loaded {len(df):,} rows.")
+with st.expander("👀 Peek at the first rows"):
+    st.dataframe(df.head(), use_container_width=True)
 
-#csv_path = Path(__file__).parent / "IMDB Dataset.csv"
-#if not csv_path.exists():
- #   st.error("❌ Could not find `IMDB Dataset.csv` next to this script.")
- #   st.stop()
-
-#df = pd.read_csv(csv_path)
-
-st.write("**Preview (first 5 rows):**")
-st.dataframe(df.head())
-
-# Basic exploration: class distribution and review length
+# Class balance
 col_a, col_b = st.columns(2)
 with col_a:
-    st.write("**Class distribution (sentiment):**")
-    st.bar_chart(df['sentiment'].value_counts())
-
-with col_b:
-    st.write("**Review length (characters):**")
-    lengths = df['review'].astype(str).apply(len)
+    st.write("**Class distribution**")
+    class_counts = df['sentiment'].value_counts().sort_index()
     fig, ax = plt.subplots()
-    sns.histplot(lengths, bins=50, ax=ax)
-    ax.set_xlabel("Length (chars)")
+    sns.barplot(x=['Negative (0)', 'Positive (1)'], y=class_counts.values, ax=ax)
     ax.set_ylabel("Count")
-    st.pyplot(fig)
+    ax.set_title("Sentiment counts")
+    st.pyplot(fig, clear_figure=True)
+with col_b:
+    st.write("**Review length (chars)**")
+    lens = df['review'].str.len()
+    fig2, ax2 = plt.subplots()
+    sns.histplot(lens, bins=40, ax=ax2)
+    ax2.set_xlabel("Characters per review")
+    ax2.set_ylabel("Frequency")
+    st.pyplot(fig2, clear_figure=True)
 
-# ============================== 2) Data Preprocessing =========================
-st.header("2) Data Preprocessing")
 
-st.markdown("""
-- Convert to lowercase  
-- Remove **HTML** and **URLs**  
-- Tokenize and remove **stop words**  
-- Convert to numeric features via **TF-IDF** (this is what the neural net will consume)
-""")
+# ================================ PREPROCESSING ================================
+st.header("🧹 Step 1 — Preprocess Text")
+with st.spinner("Cleaning and tokenizing…"):
+    df_clean = preprocess_dataframe(df)
 
-with st.spinner("Cleaning text (this can take a few seconds)…"):
-    df['clean'] = df['review'].astype(str).apply(normalize_text)
+st.success("Text preprocessed → created column `review_clean`.")
+with st.expander("🔎 Example cleaned text"):
+    st.write(df_clean[['review', 'review_clean']].head(3))
 
-st.write("**Preview of cleaned text:**")
-st.dataframe(df[['review', 'clean', 'sentiment']].head(5))
 
-# Train/Test split
-X_text = df['clean'].values
-y = (df['sentiment'].str.lower() == 'positive').astype(int).values  # positive=1, negative=0
+# ================================ TF-IDF SETUP =================================
+st.header("🧮 Step 2 — TF-IDF Vectorization")
 
-X_train_text, X_test_text, y_train, y_test = train_test_split(
-    X_text, y, test_size=0.2, random_state=42, stratify=y
+# Simple, transparent TF-IDF configuration for beginners
+max_features = st.slider(
+    "TF-IDF max features (larger = more expressive but heavier)",
+    min_value=5_000, max_value=50_000, value=20_000, step=5_000
 )
+ngram = st.selectbox("n-gram range", options=["(1,1) unigrams", "(1,2) uni+bi"], index=1)
+ngram_range = (1, 2) if "1,2" in ngram else (1, 1)
 
-# TF-IDF vectorizer
-vectorizer = TfidfVectorizer(max_features=30000, ngram_range=(1,2))
-X_train = vectorizer.fit_transform(X_train_text)
-X_test  = vectorizer.transform(X_test_text)
+vectorizer = TfidfVectorizer(max_features=max_features, ngram_range=ngram_range)
 
-st.write(f"**TF-IDF feature dimension:** `{X_train.shape[1]}`")
+with st.spinner("Fitting TF-IDF and transforming…"):
+    X = vectorizer.fit_transform(df_clean['review_clean'])
+    y = df_clean['sentiment'].values
 
-# ============================== 3) Model Building =============================
-st.header("3) Model Building")
+st.write(f"TF-IDF output shape: **{X.shape}** (sparse CSR matrix)")
+st.caption("Note: Keras Dense layers expect dense input, so we will convert only the needed parts to NumPy arrays.")
 
-input_dim = X_train.shape[1]
-model = keras.Sequential([
-    # First layer (input_dim must match TF-IDF features)  ✅
-    layers.Input(shape=(input_dim,), name="tfidf_input"),
-    layers.Dense(hidden_units, activation="relu"),
-    layers.Dropout(hidden_dropout),
-    # You can experiment with more layers if you like (kept simple and readable)
-    layers.Dense(1, activation="sigmoid")  # Output for binary classification
-])
 
-model.compile(
-    optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
-    loss="binary_crossentropy",
-    metrics=["accuracy"]
+# ================================ TRAIN/TEST SPLIT =============================
+st.header("✂️ Step 3 — Split Data")
+test_size = st.slider("Test size", 0.1, 0.3, 0.2, 0.05)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=test_size, random_state=42, stratify=y
 )
+st.write(f"Train: {X_train.shape[0]} rows | Test: {X_test.shape[0]} rows")
 
+# Create a REAL validation set (we must not use validation_split with CSR)
+val_size = st.slider("Validation size (fraction of train)", 0.1, 0.3, 0.15, 0.05)
+X_train, X_val, y_train, y_val = train_test_split(
+    X_train, y_train, test_size=val_size, random_state=42, stratify=y_train
+)
+st.write(f"Final: Train {X_train.shape[0]} | Val {X_val.shape[0]} | Test {X_test.shape[0]}")
+
+
+# ================================ BUILD THE MODEL ==============================
+st.header("🏗️ Step 4 — Build the Neural Network")
+
+input_dim = X.shape[1]  # number of TF-IDF features
+
+with st.expander("Model hyperparameters", expanded=True):
+    hidden_units = st.slider("Hidden units (layer 1)", 64, 512, 256, 32)
+    hidden_units2 = st.slider("Hidden units (layer 2)", 0, 512, 128, 32)
+    dropout_rate = st.slider("Dropout (regularization)", 0.0, 0.7, 0.3, 0.05)
+    learning_rate = st.selectbox("Learning rate", [1e-3, 5e-4, 1e-4], index=0)
+
+# Build a simple, readable Sequential model
+def build_model(input_dim: int) -> keras.Model:
+    """
+    A small Dense network for binary classification.
+    We keep it simple so beginners can map code → concept.
+    """
+    model = keras.Sequential(name="tfidf_dense_classifier")
+    model.add(layers.Input(shape=(input_dim,), name="tfidf_input"))
+    model.add(layers.Dense(hidden_units, activation="relu", name="dense_1"))
+    if hidden_units2 > 0:
+        model.add(layers.Dense(hidden_units2, activation="relu", name="dense_2"))
+    if dropout_rate > 0:
+        model.add(layers.Dropout(dropout_rate, name="dropout"))
+    model.add(layers.Dense(1, activation="sigmoid", name="output"))  # sigmoid for binary
+    opt = keras.optimizers.Adam(learning_rate=learning_rate)
+    model.compile(optimizer=opt, loss="binary_crossentropy", metrics=["accuracy"])
+    return model
+
+model = build_model(input_dim)
 st.code(model.summary(print_fn=lambda x: st.text(x)), language="text")
 
-# ============================== 4) Model Training =============================
-st.header("4) Model Training")
 
-callbacks = []
-if use_es:
-    callbacks.append(
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=es_patience,
-            min_delta=es_min_delta,
-            mode="min",
-            restore_best_weights=True,
-            verbose=1
-        )
-    )
+# ================================ TRAIN THE MODEL ==============================
+st.header("🏃 Step 5 — Train")
+
+# Controls required by your spec
+epochs = st.slider("Max epochs", min_value=1, max_value=100, value=10, step=1)
+batch_size = st.selectbox("Batch size", [32, 64, 128, 256], index=1)
+
+# EarlyStopping (configurable)
+st.subheader("Early stopping")
+patience = st.slider("Patience (epochs without improvement)", 1, 10, 3, 1)
+min_delta = st.number_input("Minimum loss improvement (min_delta)", min_value=0.0, value=0.0, step=0.001, format="%.3f")
+early_stop = keras.callbacks.EarlyStopping(
+    monitor="val_loss", mode="min", patience=patience, min_delta=min_delta, restore_best_weights=True, verbose=0
+)
+
+# Convert only the subsets we will use into dense NumPy arrays
+with st.spinner("Converting sparse matrices to dense (only what's needed for Keras)…"):
+    X_train_dense = X_train.toarray()
+    X_val_dense = X_val.toarray()
 
 with st.spinner("Training the model…"):
     history = model.fit(
-        X_train, y_train,
-        epochs=epochs,                       # ✅ now up to 100
+        X_train_dense, y_train,
+        epochs=epochs,
         batch_size=batch_size,
-        validation_split=val_split,
-        callbacks=callbacks,
+        validation_data=(X_val_dense, y_val),  # ✅ real validation set (no CSR issue)
+        callbacks=[early_stop],
         verbose=0
     )
 
-st.success("Training finished.")
+st.success("Training finished (best weights restored).")
 
-# ============================== 5) Evaluation (Test set) ======================
-st.header("5) Evaluation on Test Set")
+# Visualize training curves
+hist = history.history
+col_l, col_r = st.columns(2)
+with col_l:
+    fig, ax = plt.subplots()
+    ax.plot(hist["loss"], label="train")
+    ax.plot(hist["val_loss"], label="val")
+    ax.set_title("Loss over epochs")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Binary crossentropy")
+    ax.legend()
+    st.pyplot(fig, clear_figure=True)
 
-test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
-st.write(f"**Test Loss:** {test_loss:.4f}  |  **Test Accuracy:** {test_acc:.4f}")
+with col_r:
+    fig, ax = plt.subplots()
+    ax.plot(hist["accuracy"], label="train")
+    ax.plot(hist["val_accuracy"], label="val")
+    ax.set_title("Accuracy over epochs")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Accuracy")
+    ax.legend()
+    st.pyplot(fig, clear_figure=True)
 
-# ---------- 6) Visualization: training curves ----------
-st.header("6) Visualization (Training Curves)")
 
-fig1, ax1 = plt.subplots()
-ax1.plot(history.history['loss'], label='train_loss')
-ax1.plot(history.history['val_loss'], label='val_loss')
-ax1.set_xlabel("Epoch")
-ax1.set_ylabel("Binary cross-entropy loss")
-ax1.legend()
-st.pyplot(fig1)
+# ================================== EVALUATION =================================
+st.header("🧪 Step 6 — Evaluate on Test Set")
 
-fig2, ax2 = plt.subplots()
-ax2.plot(history.history['accuracy'], label='train_acc')
-ax2.plot(history.history['val_accuracy'], label='val_acc')
-ax2.set_xlabel("Epoch")
-ax2.set_ylabel("Accuracy")
-ax2.legend()
-st.pyplot(fig2)
+with st.spinner("Preparing test set…"):
+    X_test_dense = X_test.toarray()
 
-# =================== 3) Confusion Matrix + Precision/Recall/F1 =================
-st.header("📊 Confusion Matrix & Precision/Recall/F1 (on Test Set)")
+test_loss, test_acc = model.evaluate(X_test_dense, y_test, verbose=0)
+st.success(f"Test accuracy: **{test_acc:.3f}** | Test loss: **{test_loss:.3f}**")
 
-# Predictions -> labels
-y_prob = model.predict(X_test, verbose=0).ravel()
-y_pred = (y_prob >= 0.5).astype(int)
+
+# =================== CONFUSION MATRIX + PRECISION/RECALL/F1 ====================
+st.header("📊 Step 7 — Confusion Matrix & Precision/Recall/F1")
+
+y_proba = model.predict(X_test_dense, verbose=0).ravel()
+y_pred = (y_proba >= 0.5).astype(int)
 
 # Confusion matrix
-cm = confusion_matrix(y_test, y_pred, labels=[0, 1])  # 0=neg, 1=pos
-fig_cm, ax_cm = plt.subplots()
-sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-            xticklabels=["Negative", "Positive"],
-            yticklabels=["Negative", "Positive"],
-            ax=ax_cm)
-ax_cm.set_xlabel("Predicted")
-ax_cm.set_ylabel("True")
-st.pyplot(fig_cm)
+cm = confusion_matrix(y_test, y_pred, labels=[0, 1])
+fig, ax = plt.subplots()
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=False,
+            xticklabels=["Pred: Neg (0)", "Pred: Pos (1)"],
+            yticklabels=["True: Neg (0)", "True: Pos (1)"],
+            ax=ax)
+ax.set_title("Confusion Matrix")
+st.pyplot(fig, clear_figure=True)
 
 # Precision / Recall / F1
-prec, rec, f1, sup = precision_recall_fscore_support(y_test, y_pred, labels=[0,1], zero_division=0)
-report_df = pd.DataFrame({
-    "class": ["Negative (0)", "Positive (1)"],
-    "precision": np.round(prec, 4),
-    "recall":    np.round(rec, 4),
-    "f1-score":  np.round(f1, 4),
-    "support":   sup
-})
-st.write("**Per-class metrics:**")
-st.dataframe(report_df, use_container_width=True)
+prec, rec, f1, _ = precision_recall_fscore_support(y_test, y_pred, average='binary', pos_label=1)
+st.write(f"**Precision (positive=1)**: {prec:.3f}  |  **Recall**: {rec:.3f}  |  **F1**: {f1:.3f}")
 
-st.write("**Classification report (text):**")
-st.code(classification_report(y_test, y_pred, target_names=["Negative", "Positive"]), language="text")
+# Full classification report (per class)
+st.text("Classification report:\n" + classification_report(y_test, y_pred, digits=3))
 
-# ============================== 7) Report (Insights) ==========================
-st.header("7) Report — Insights & Next Steps")
+
+# ==================================== REPORT ===================================
+st.header("📝 Step 8 — Report (Insights, Challenges, Improvements)")
 
 st.markdown("""
-**What we learned**
-- TF-IDF transforms reviews into numeric features that work well with dense networks.
-- EarlyStopping helps stop training when validation loss stops improving, often yielding better generalization.
-- Confusion matrix and Precision/Recall/F1 reveal class-wise behavior beyond average accuracy.
+**Insights gained:**
+- A simple TF-IDF + Dense NN can already reach strong accuracy on IMDb reviews.
+- Bigger `max_features` and `(1,2)` n-grams often help, at the cost of memory.
+- Early stopping on `val_loss` prevents overfitting and speeds up training.
 
-**Challenges**
-- Text cleaning choices (stopwords, n-grams, max_features) strongly affect performance and speed.
-- Class imbalance is mild in IMDb, but always verify the distribution before training. 
-- Overfitting can happen quickly; regularization (dropout), EarlyStopping, and more data help.
+**Challenges faced and solutions:**
+- *CSR matrices + Keras `validation_split`* → **Fix:** create an explicit validation set with `train_test_split` and pass `validation_data=(X_val, y_val)`.
+- *Sparse input to Dense layers* → **Fix:** convert only the needed subsets to **dense** with `.toarray()`.
+- *NLTK downloads failing on Streamlit Cloud* → **Fix:** create `~/nltk_data` if needed and pass `download_dir` + `quiet=True`.
 
-**Potential improvements**
-- Try more/larger hidden layers or different activations.
-- Tune TF-IDF (bigrams/trigrams, max_features).
-- Replace TF-IDF + Dense with pretrained embeddings (e.g., GloVe) or modern text models (e.g., BERT/DistilBERT) for stronger accuracy.
+**Potential improvements:**
+- Try classical linear models (e.g., Logistic Regression, Linear SVM) — often competitive on TF-IDF.
+- Add text cleaning extras (lemmatization, handling negations).
+- Explore CNN/bi-LSTM/transformers with embeddings for richer representations.
+- Use calibration for probabilities or threshold tuning for better precision/recall trade-offs.
 """)
-
-
-
