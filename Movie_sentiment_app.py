@@ -4,7 +4,6 @@
 # 💡 This Streamlit app follows the requested, step-by-step educational flow.
 # -----------------------------------------------------------------------------
 
-import os
 import io
 import re
 import unicodedata
@@ -33,9 +32,24 @@ from sklearn.metrics import confusion_matrix, classification_report, precision_r
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 # TensorFlow / Keras
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
+#import tensorflow as tf
+#from tensorflow import keras
+#from tensorflow.keras import layers
+
+try:
+    import tensorflow as tf
+    from tensorflow import keras
+    from tensorflow.keras import layers
+except Exception as e:
+    import streamlit as st
+    st.error(
+        "TensorFlow n'est pas disponible dans l'environnement. "
+        "Vérifie `runtime.txt` (=3.10) et `requirements.txt` (tensorflow-cpu==2.12.0)."
+    )
+    st.stop()
+
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # moins de logs verbeux de TF
 
 # ============================== NLTK safety download ==========================
 def safe_nltk_download(resource, name):
@@ -290,3 +304,4 @@ st.markdown("""
 - Tune TF-IDF (bigrams/trigrams, max_features).
 - Replace TF-IDF + Dense with pretrained embeddings (e.g., GloVe) or modern text models (e.g., BERT/DistilBERT) for stronger accuracy.
 """)
+
