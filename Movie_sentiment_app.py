@@ -128,89 +128,90 @@ import pandas as pd
 import csv
 import streamlit as st
 
+from pathlib import Path
+import pandas as pd
+import csv
+import streamlit as st
+
 def find_imdb_csv() -> Path | None:
-    """Look for the CSV in common locations on Streamlit Cloud."""
     here = Path(__file__).parent
     candidates = [
-        here / "IMDB Dataset.csv",           # repo root (same folder as the app)
-        here / "data" / "IMDB Dataset.csv",  # repo/data/IMDB Dataset.csv
-        here / "datasets" / "IMDB Dataset.csv",
+        here / "IMDB Dataset.csv",
+        here / "data" / "IMDB Dataset.csv",
     ]
     for p in candidates:
         if p.exists():
             return p
+    # Dernière chance: prendre le premier CSV qui contient "IMDB" dans le nom
+    for p in here.glob("*.csv"):
+        if "imdb" in p.name.lower():
+            return p
+    for p in (here / "data").glob("*.csv") if (here / "data").exists() else []:
+        if "imdb" in p.name.lower():
+            return p
     return None
 
-def load_imdb_csv_safely(csv_path: Path) -> pd.DataFrame:
-    """
-    Try multiple robust read strategies:
-    - vanilla fast path
-    - encoding fallback
-    - parser fallback (python engine, escapechar)
-    - last resort: skip bad lines
-    """
-    # 1) fast path
-    try:
-        return pd.read_csv(csv_path)
-    except UnicodeDecodeError:
-        pass
-    except pd.errors.ParserError:
-        pass
-    except Exception as e:
-        st.warning(f"Standard read failed: {e}")
+def read_imdb_csv(csv_path: Path) -> pd.DataFrame:
+    # Petit aperçu pour debug
+    size = csv_path.stat().st_size
+    st.caption(f"📄 Using `{csv_path.name}` • size: {size:,} bytes")
+    with csv_path.open("rb") as f:
+        head = f.read(300)
+    st.code(head.decode("utf-8", errors="replace"), language="text")
 
-    # 2) encoding fallback
-    for enc in ("utf-8", "utf-8-sig", "latin-1"):
-        try:
-            return pd.read_csv(csv_path, encoding=enc)
-        except Exception:
-            continue
-
-    # 3) parser fallback with quotes/escapes handled
+    # Détection du séparateur la plus simple possible
+    with csv_path.open("r", encoding="utf-8", errors="replace", newline="") as f:
+        sample = f.read(10_000)
     try:
-        return pd.read_csv(
-            csv_path,
-            encoding="utf-8",
-            engine="python",              # more forgiving
-            quoting=csv.QUOTE_MINIMAL,    # CSV has quoted reviews
-            escapechar="\\",              # escape stray quotes
-        )
+        dialect = csv.Sniffer().sniff(sample, delimiters=[",",";","\t","|"])
+        sep = dialect.delimiter
     except Exception:
-        pass
+        # Heuristique minimale
+        sep_counts = {",": sample.count(","), ";": sample.count(";"), "\t": sample.count("\t")}
+        sep = max(sep_counts, key=sep_counts.get)
 
-    # 4) last resort: skip bad lines (not ideal, but unblocks)
-    try:
-        return pd.read_csv(
-            csv_path,
-            encoding="utf-8",
-            engine="python",
-            quoting=csv.QUOTE_MINIMAL,
-            escapechar="\\",
-            on_bad_lines="skip"
-        )
-    except Exception as e:
-        st.error(
-            "❌ Failed to read 'IMDB Dataset.csv'.\n\n"
-            f"Details: {e}\n\n"
-            "Tips:\n"
-            "• Make sure the exact file name is **IMDB Dataset.csv** (case sensitive on Linux).\n"
-            "• Place it in the repository (same folder as the app) or in a 'data/' folder committed to Git.\n"
-            "• Re-download the original dataset (avoid copies edited by Excel/Sheets)."
-        )
+    # Lecture
+    df = pd.read_csv(csv_path, sep=sep, encoding="utf-8", on_bad_lines="skip")
+    # Normalisation douce des colonnes
+    df.columns = [c.strip().lower() for c in df.columns]
+    # Tentative de mapping si noms un peu différents
+    col_map = {}
+    if "review" not in df.columns:
+        # cherche une colonne qui ressemble à review
+        for c in df.columns:
+            if "review" in c or "text" in c or "comment" in c:
+                col_map[c] = "review"
+                break
+    if "sentiment" not in df.columns:
+        for c in df.columns:
+            if "sentiment" in c or "label" in c or "target" in c:
+                col_map[c] = "sentiment"
+                break
+    if col_map:
+        df = df.rename(columns=col_map)
+
+    # Validation finale
+    missing = {"review", "sentiment"} - set(df.columns)
+    if missing:
+        st.error(f"❌ Columns missing: {missing}. Expected exactly: 'review' and 'sentiment'.")
         st.stop()
 
-# ---- Use it in your app ----
+    # Messages utiles
+    st.success(f"Loaded {len(df):,} rows with columns {list(df.columns)}.")
+    if len(df) < 50_000:
+        st.info("ℹ️ You’re using a subset (e.g., 10k rows). That’s fine for a PoC and will train faster.")
+
+    # Nettoyage basique (enlève lignes vides)
+    df = df.dropna(subset=["review", "sentiment"]).reset_index(drop=True)
+    return df
+
+# === Utilisation ===
 csv_path = find_imdb_csv()
 if not csv_path:
-    st.error(
-        "📄 'IMDB Dataset.csv' not found.\n\n"
-        "Place the file in the same folder as your app **or** in a 'data/' folder.\n"
-        "Commit & push to GitHub so Streamlit Cloud can see it."
-    )
+    st.error("Place `IMDB Dataset.csv` at the app root or in `data/`, then redeploy.")
     st.stop()
 
-st.caption(f"Loading dataset from: `{csv_path}`")
-df = load_imdb_csv_safely(csv_path)
+df = read_imdb_csv(csv_path)
 st.success(f"Loaded {len(df):,} rows.")
 st.dataframe(df.head())
 
@@ -397,5 +398,6 @@ st.markdown("""
 - Tune TF-IDF (bigrams/trigrams, max_features).
 - Replace TF-IDF + Dense with pretrained embeddings (e.g., GloVe) or modern text models (e.g., BERT/DistilBERT) for stronger accuracy.
 """)
+
 
 
