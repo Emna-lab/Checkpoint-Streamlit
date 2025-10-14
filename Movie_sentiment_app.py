@@ -3,14 +3,6 @@
 # 🎬 IMDb Sentiment Classification — Neural Network (TF-IDF)
 # A playful, step-by-step lab that trains a simple neural net
 # to classify movie reviews as positive or negative.
-#
-# Notes about robustness (to avoid deployment errors):
-# - CSV loader auto-detects location (root or data/) and encodings.
-# - No hard NLTK dependency at runtime: we *try* NLTK stopwords,
-#   but safely fall back to scikit-learn's built-in list.
-# - TF-IDF features are converted to dense arrays for Keras so
-#   validation_split works (Keras cannot split sparse matrices).
-# - EarlyStopping is included and configurable from the sidebar.
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -385,3 +377,4 @@ st.markdown("""
 - Tune TF-IDF (bigrams/trigrams, `max_features`).
 - Replace TF-IDF + Dense with pretrained embeddings (e.g., GloVe) or transformer models (e.g., DistilBERT) for stronger accuracy.
 """)
+
