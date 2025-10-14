@@ -57,14 +57,12 @@ EN_STOP = set(stopwords.words('english'))
 # ============================= STREAMLIT HEADER ================================
 st.set_page_config(page_title="IMDb Sentiment — Simple NN (TF-IDF + Keras)",
                    page_icon="🎬", layout="wide")
-st.title("🎬 IMDb Movie Review Sentiment — Simple Neural Network (TF-IDF + Keras)")
-st.write("""
-**Goal (for beginners):** Train a small neural network to classify IMDb reviews as **positive** or **negative**.  
-This app is deliberately simple and pedagogical, with very explicit comments and visuals.
-""")
+st.title("🎬 IMDb Sentiment Classification — Neural Network (TF-IDF)")
 
-st.info("➡️ Place a file named **`IMDB Dataset.csv`** at the app root **or** in a `data/` folder. "
-        "It must contain two columns: `review` (text) and `sentiment` (`positive`/`negative`).")
+st.markdown("""
+This playful lab trains a **simple neural network** to classify movie reviews from IMDb
+as **positive** or **negative**.
+""")
 
 
 # ============================ HELPER: READ CSV SAFE ============================
@@ -398,3 +396,4 @@ st.markdown("""
 - Explore CNN/bi-LSTM/transformers with embeddings for richer representations.
 - Use calibration for probabilities or threshold tuning for better precision/recall trade-offs.
 """)
+
