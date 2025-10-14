@@ -122,12 +122,105 @@ def normalize_text(s: str) -> str:
 # ============================== 1) Data Loading & Exploration =================
 st.header("1) Data Loading and Exploration")
 
-csv_path = Path(__file__).parent / "IMDB Dataset.csv"
-if not csv_path.exists():
-    st.error("❌ Could not find `IMDB Dataset.csv` next to this script.")
+# --- Drop-in replacement for your current CSV load ---
+from pathlib import Path
+import pandas as pd
+import csv
+import streamlit as st
+
+def find_imdb_csv() -> Path | None:
+    """Look for the CSV in common locations on Streamlit Cloud."""
+    here = Path(__file__).parent
+    candidates = [
+        here / "IMDB Dataset.csv",           # repo root (same folder as the app)
+        here / "data" / "IMDB Dataset.csv",  # repo/data/IMDB Dataset.csv
+        here / "datasets" / "IMDB Dataset.csv",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+def load_imdb_csv_safely(csv_path: Path) -> pd.DataFrame:
+    """
+    Try multiple robust read strategies:
+    - vanilla fast path
+    - encoding fallback
+    - parser fallback (python engine, escapechar)
+    - last resort: skip bad lines
+    """
+    # 1) fast path
+    try:
+        return pd.read_csv(csv_path)
+    except UnicodeDecodeError:
+        pass
+    except pd.errors.ParserError:
+        pass
+    except Exception as e:
+        st.warning(f"Standard read failed: {e}")
+
+    # 2) encoding fallback
+    for enc in ("utf-8", "utf-8-sig", "latin-1"):
+        try:
+            return pd.read_csv(csv_path, encoding=enc)
+        except Exception:
+            continue
+
+    # 3) parser fallback with quotes/escapes handled
+    try:
+        return pd.read_csv(
+            csv_path,
+            encoding="utf-8",
+            engine="python",              # more forgiving
+            quoting=csv.QUOTE_MINIMAL,    # CSV has quoted reviews
+            escapechar="\\",              # escape stray quotes
+        )
+    except Exception:
+        pass
+
+    # 4) last resort: skip bad lines (not ideal, but unblocks)
+    try:
+        return pd.read_csv(
+            csv_path,
+            encoding="utf-8",
+            engine="python",
+            quoting=csv.QUOTE_MINIMAL,
+            escapechar="\\",
+            on_bad_lines="skip"
+        )
+    except Exception as e:
+        st.error(
+            "❌ Failed to read 'IMDB Dataset.csv'.\n\n"
+            f"Details: {e}\n\n"
+            "Tips:\n"
+            "• Make sure the exact file name is **IMDB Dataset.csv** (case sensitive on Linux).\n"
+            "• Place it in the repository (same folder as the app) or in a 'data/' folder committed to Git.\n"
+            "• Re-download the original dataset (avoid copies edited by Excel/Sheets)."
+        )
+        st.stop()
+
+# ---- Use it in your app ----
+csv_path = find_imdb_csv()
+if not csv_path:
+    st.error(
+        "📄 'IMDB Dataset.csv' not found.\n\n"
+        "Place the file in the same folder as your app **or** in a 'data/' folder.\n"
+        "Commit & push to GitHub so Streamlit Cloud can see it."
+    )
     st.stop()
 
-df = pd.read_csv(csv_path)
+st.caption(f"Loading dataset from: `{csv_path}`")
+df = load_imdb_csv_safely(csv_path)
+st.success(f"Loaded {len(df):,} rows.")
+st.dataframe(df.head())
+
+
+#csv_path = Path(__file__).parent / "IMDB Dataset.csv"
+#if not csv_path.exists():
+ #   st.error("❌ Could not find `IMDB Dataset.csv` next to this script.")
+ #   st.stop()
+
+#df = pd.read_csv(csv_path)
 
 st.write("**Preview (first 5 rows):**")
 st.dataframe(df.head())
@@ -304,4 +397,5 @@ st.markdown("""
 - Tune TF-IDF (bigrams/trigrams, max_features).
 - Replace TF-IDF + Dense with pretrained embeddings (e.g., GloVe) or modern text models (e.g., BERT/DistilBERT) for stronger accuracy.
 """)
+
 
